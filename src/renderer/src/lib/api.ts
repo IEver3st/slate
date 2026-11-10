@@ -12,7 +12,7 @@ export type Suggestion =
   | { kind: "hide"; layerId: number; layer: string; hidden: boolean }
   | { kind: "actions"; actions: unknown[]; summary: string };
 export type ThreadEntry = { id: string; author: Author; text: string; at: string; rev?: number; status?: NoteStatus };
-export type ContextLayer = { id: number; name: string; type: string; path: string[]; text?: string; asset?: string; sourceMs?: number; volume?: number; hidden?: boolean };
+export type ContextLayer = { id: number; name: string; type: string; path: string[]; text?: string; asset?: string; sourceMs?: number; volume?: number; hidden?: boolean; hiddenBy?: { id: number; name: string } };
 export type Note = {
   id: string;
   kind: "note" | "edit";
@@ -84,7 +84,7 @@ export type CutSummary = {
   path: string;
   name: string;
   folder: string;
-  latest?: { n: number; at: string; author: Author; durationMs: number; width: number; height: number; summary?: string; changed: number[]; segments: number };
+  latest?: { n: number; hash: string; at: string; author: Author; durationMs: number; width: number; height: number; summary?: string; changed: number[]; segments: number };
   recent: { n: number; at: string; author: Author }[];
   openNotes: number;
   draftNotes: number;
@@ -120,6 +120,8 @@ export type CutDetail = CutSummary & {
   movie?: { rev: number; key: string; stale: number[]; missing: number[]; complete: boolean };
   jobs: { id: string; rev: number; from: number; to: number; state: string; progress?: number }[];
   renderError?: string;
+  storageNotice?: string;
+  snapshotBytes: number;
   export?: ExportState;
   notes: Note[];
   activity: Activity[];

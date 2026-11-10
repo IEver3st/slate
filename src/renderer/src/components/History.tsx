@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 import type { CutDetail, RevisionInfo } from "@/lib/api";
-import { ago, cn } from "@/lib/format";
+import { ago, cn, megabytes } from "@/lib/format";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "./ui/menu";
 
 function Changed({ rev, seconds }: { rev: RevisionInfo; seconds: number }) {
@@ -38,7 +38,11 @@ export function History({
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-      <div className="px-3 pt-3 pb-1 text-[12.5px] text-dim">Revisions</div>
+      <div className="flex items-baseline justify-between gap-3 px-3 pt-3 pb-1 text-[12.5px] text-dim">
+        <span>Revisions</span>
+        {cut.snapshotBytes > 0 && <span className="text-faint" title="Disk used next to this cut for revisions you can restore">Restore points {megabytes(cut.snapshotBytes)}</span>}
+      </div>
+      {cut.storageNotice && <div className="mx-1 mb-1 rounded-xl px-3 py-2 text-[12.5px] text-soft">{cut.storageNotice}</div>}
       {revs.map((r) => {
         const isViewing = (viewing ?? latest) === r.n;
         return (

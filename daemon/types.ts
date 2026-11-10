@@ -21,6 +21,9 @@ export type Revision = {
   addresses?: string[];
   published?: boolean;
   keySig?: string;
+  saves?: number;
+  firstAt?: string;
+  fileId?: string;
 };
 
 export type Annotation =
@@ -81,7 +84,7 @@ export type CutSummary = {
   path: string;
   name: string;
   folder: string;
-  latest?: { n: number; at: string; author: Author; durationMs: number; width: number; height: number; summary?: string; changed: number[]; segments: number };
+  latest?: { n: number; hash: string; at: string; author: Author; durationMs: number; width: number; height: number; summary?: string; changed: number[]; segments: number };
   recent: { n: number; at: string; author: Author }[];
   openNotes: number;
   draftNotes: number;

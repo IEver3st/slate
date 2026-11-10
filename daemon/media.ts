@@ -135,23 +135,45 @@ export function sliceWav(wav: Wav, segmentCount: number, segmentMsList: number[]
   return out;
 }
 
+async function segmentPcm(file: string | undefined, bytes: number): Promise<Uint8Array> {
+  if (!file) return new Uint8Array(bytes);
+  let data: Uint8Array;
+  try {
+    data = await Bun.file(file).bytes();
+  } catch {
+    return new Uint8Array(bytes);
+  }
+  if (data.length === bytes) return data;
+  const out = new Uint8Array(bytes);
+  out.set(data.subarray(0, bytes));
+  return out;
+}
+
 export async function encodeMovie(video: string[], audio: (string | undefined)[], lengths: number[], outFile: string) {
-  const total = lengths.reduce((a, b) => a + b, 0);
-  const pcm = Buffer.alloc(Math.round((total * PCM_RATE) / 1000) * PCM_BYTES_PER_FRAME);
-  let offset = 0;
-  audio.forEach((f, i) => {
-    const bytes = Math.round((lengths[i] * PCM_RATE) / 1000) * PCM_BYTES_PER_FRAME;
-    if (f && existsSync(f)) readFileSync(f).copy(pcm, offset, 0, bytes);
-    offset += bytes;
-  });
   const list = `${outFile}.txt`;
   writeFileSync(list, video.map((f) => `file '${f.split(String.fromCharCode(92)).join("/")}'`).join(String.fromCharCode(10)));
   const tmp = `${outFile}.part.mp4`;
   try {
-    await ffmpeg(
-      ["-f", "concat", "-safe", "0", "-i", list, "-f", "s16le", "-ar", String(PCM_RATE), "-ac", String(PCM_CHANNELS), "-i", "pipe:0", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "flac", "-movflags", "+faststart", "-f", "mp4", tmp],
-      pcm,
-    );
+    const args = ["-f", "concat", "-safe", "0", "-i", list, "-f", "s16le", "-ar", String(PCM_RATE), "-ac", String(PCM_CHANNELS), "-i", "pipe:0", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "flac", "-movflags", "+faststart", "-f", "mp4", tmp];
+    const p = Bun.spawn([FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", ...args], { stdin: "pipe", stdout: "ignore", stderr: "pipe", windowsHide: true });
+    const stderr = new Response(p.stderr).text();
+    let writeError: unknown;
+    try {
+      let next = segmentPcm(audio[0], Math.round((lengths[0] * PCM_RATE) / 1000) * PCM_BYTES_PER_FRAME);
+      for (let i = 0; i < audio.length; i++) {
+        const chunk = await next;
+        if (i + 1 < audio.length) next = segmentPcm(audio[i + 1], Math.round((lengths[i + 1] * PCM_RATE) / 1000) * PCM_BYTES_PER_FRAME);
+        p.stdin.write(chunk);
+        await p.stdin.flush();
+      }
+      await p.stdin.end();
+    } catch (e) {
+      writeError = e;
+      p.kill();
+    }
+    const [code, err] = await Promise.all([p.exited, stderr]);
+    if (code !== 0) throw new Error(`ffmpeg failed: ${err.trim().split("\n").slice(-3).join(" | ")}`);
+    if (writeError) throw writeError;
     renameSync(tmp, outFile);
   } finally {
     rmSync(list, { force: true });

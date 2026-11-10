@@ -242,7 +242,7 @@ server.registerTool(
     },
     annotations: { readOnlyHint: true },
   },
-  ({ cut, status, since }) => guarded(async () => text(await call("/api/agent/feedback", { cut, status, since }))),
+  ({ cut, status, since }) => guarded(async () => text(await call("/api/agent/feedback", { cut, status, since, agent: await agentName() }))),
 );
 
 server.registerTool(
@@ -253,7 +253,7 @@ server.registerTool(
     inputSchema: { cut, since: z.string().optional().describe("ISO time from your last wait or feedback call."), timeoutSec: z.number().min(1).max(50).optional() },
     annotations: { readOnlyHint: true },
   },
-  ({ cut, since, timeoutSec }) => guarded(async () => text(await call("/api/agent/wait", { cut, since, timeoutSec: timeoutSec ?? 45 }))),
+  ({ cut, since, timeoutSec }) => guarded(async () => text(await call("/api/agent/wait", { cut, since, timeoutSec: timeoutSec ?? 45, agent: await agentName() }))),
 );
 
 server.registerTool(
@@ -274,7 +274,7 @@ server.registerTool(
     inputSchema: { cut, t: z.number().describe("Time in ms."), revision: z.number().int().optional(), exact: z.boolean().optional() },
     annotations: { readOnlyHint: true },
   },
-  ({ cut, t, revision, exact }) => guarded(async () => text(await call("/api/agent/frame", { cut, t, revision, exact }))),
+  ({ cut, t, revision, exact }) => guarded(async () => text(await call("/api/agent/frame", { cut, t, revision, exact, agent: await agentName() }))),
 );
 
 server.registerTool(
@@ -285,7 +285,7 @@ server.registerTool(
     inputSchema: { cut },
     annotations: { readOnlyHint: true },
   },
-  ({ cut }) => guarded(async () => text(await call("/api/agent/revisions", { cut }))),
+  ({ cut }) => guarded(async () => text(await call("/api/agent/revisions", { cut, agent: await agentName() }))),
 );
 
 type Setup = {

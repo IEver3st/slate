@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync, statSync, readdirSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, readdirSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { exportSpan, findCli, tryFindCli } from "./tsrct";
@@ -7,8 +7,8 @@ import { AUDIO_CACHE, BIN_DIR, FRAME_CACHE, JOB_DIR, MOVIE_CACHE, THUMB_CACHE, V
 import { SEGMENT_MS } from "./doc";
 import { emit } from "./events";
 import { cacheLimitBytes, onServiceChange, serviceSettings } from "./service";
-import type { Cut } from "./cuts";
-import { RENDER_SETTINGS } from "./cuts";
+import type { Cut, SourceLease } from "./cuts";
+import { RENDER_SETTINGS, stampOf } from "./cuts";
 import type { Revision, SegmentState } from "./types";
 
 export const SHIM = join(BIN_DIR, "dailies-ffmpeg.exe");
@@ -35,6 +35,7 @@ type Job = {
   id: string;
   cut: Cut;
   rev: number;
+  hash: string;
   from: number;
   to: number;
   vkeys: string[];
@@ -50,6 +51,16 @@ type Job = {
 };
 
 type CutStats = { startupMs: number; perSegmentMs: number; samples: number; large: boolean };
+
+const CHUNK_MIN = 8;
+const CHUNK_MAX = 240;
+const ASSEMBLE_MIN_GAP_MS = 4000;
+const PLAYHEAD_FRESH_MS = 60_000;
+
+function chunkFor(st: CutStats, audioOnly: boolean) {
+  if (audioOnly) return CHUNK_MAX;
+  return Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil((3 * st.startupMs) / st.perSegmentMs)));
+}
 
 export type Movie = {
   cutId: string;
@@ -70,6 +81,8 @@ export class Renderer {
   private movies = new Map<string, Movie>();
   private assembling = new Map<string, Promise<void>>();
   private assembleAgain = new Set<string>();
+  private assembled = new Map<string, { at: number; ms: number }>();
+  private assembleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private cli = tryFindCli();
   private failures = new Map<string, { at: number; error: string }>();
   concurrency = serviceSettings().renderSlots;
@@ -96,6 +109,11 @@ export class Renderer {
     return join(MOVIE_CACHE, `${cutId}-r${rev}-${key}.mp4`);
   }
 
+  dropQueued(cut: Cut, revN: number) {
+    const hash = cut.revision(revN)?.hash;
+    this.queue = this.queue.filter((j) => j.cut.id !== cut.id || j.rev !== revN || j.hash === hash);
+  }
+
   abandon(cut: Cut, revN: number) {
     this.queue = this.queue.filter((j) => j.cut.id !== cut.id || j.rev !== revN);
     for (const j of this.running) {
@@ -116,7 +134,7 @@ export class Renderer {
     return rev.vkeys.map((vk, s) => {
       const ak = rev.akeys[s];
       if (existsSync(videoFile(vk)) && existsSync(audioFile(ak))) return "ready";
-      const job = [...this.running, ...this.queue].find((j) => j.cut.id === cut.id && j.from <= s && s < j.to && j.vkeys[s - j.from] === vk);
+      const job = [...this.running, ...this.queue].find((j) => j.cut.id === cut.id && j.error !== "superseded" && j.from <= s && s < j.to && j.vkeys[s - j.from] === vk);
       if (job) return job.state === "running" ? "rendering" : "queued";
       if (this.failures.has(`${vk}:${ak}`)) return "failed";
       return "missing";
@@ -169,7 +187,7 @@ export class Renderer {
       const hasVideo = existsSync(videoFile(vk));
       if (hasVideo && existsSync(audioFile(ak))) continue;
       if (this.failures.has(`${vk}:${ak}`)) continue;
-      const covered = [...this.running, ...this.queue].some((j) => j.cut.id === cut.id && j.vkeys.includes(vk) && j.akeys[j.vkeys.indexOf(vk)] === ak);
+      const covered = [...this.running, ...this.queue].some((j) => j.cut.id === cut.id && j.error !== "superseded" && j.vkeys.includes(vk) && j.akeys[j.vkeys.indexOf(vk)] === ak);
       if (!covered) needed.push({ s, audioOnly: hasVideo });
     }
     const runs: [number, number, boolean][] = [];
@@ -191,6 +209,7 @@ export class Renderer {
           id: randomUUID().slice(0, 8),
           cut,
           rev: rev.n,
+          hash: rev.hash,
           from,
           to,
           vkeys: rev.vkeys.slice(from, to),
@@ -210,7 +229,7 @@ export class Renderer {
   private dropSuperseded(cut: Cut, rev: Revision) {
     const wanted = new Set(rev.vkeys.map((v, i) => `${v}:${rev.akeys[i]}`));
     const useful = (j: Job) => j.vkeys.some((v, i) => wanted.has(`${v}:${j.akeys[i]}`));
-    this.queue = this.queue.filter((j) => j.cut.id !== cut.id || useful(j));
+    this.queue = this.queue.filter((j) => j.cut.id !== cut.id || (j.rev === rev.n ? useful(j) : !!cut.renderSource(j.rev)));
     for (const j of this.running) {
       if (j.cut.id === cut.id && !useful(j)) {
         j.error = "superseded";
@@ -220,37 +239,73 @@ export class Renderer {
   }
 
   private statsFor(cut: Cut): CutStats {
+    const large = (cut.latest?.fileSize ?? 0) > 1_000_000_000;
     let st = this.stats.get(cut.id);
     if (!st) {
-      const size = cut.latest?.fileSize ?? 0;
-      const large = size > 1_000_000_000;
       st = { startupMs: large ? 35000 : 6000, perSegmentMs: large ? 10000 : 700, samples: 0, large };
       this.stats.set(cut.id, st);
     }
+    st.large = large;
     return st;
   }
 
-  private reprioritize() {
-    const now = Date.now();
+  private playheadSegment(cutId: string) {
+    const ph = this.playheads.get(cutId);
+    return ph && Date.now() - ph.at < PLAYHEAD_FRESH_MS ? Math.floor(ph.t / SEGMENT_MS) : undefined;
+  }
+
+  private rank() {
     for (const j of this.queue) {
-      const ph = this.playheads.get(j.cut.id);
+      const seg = this.playheadSegment(j.cut.id);
       let p = 0;
       if (j.rev === j.cut.latest?.n) p += 1000;
-      if (ph && now - ph.at < 60_000) {
+      if (seg !== undefined) {
         p += 500;
-        const seg = Math.floor(ph.t / SEGMENT_MS);
         if (seg >= j.from && seg < j.to) p += 2000;
-        else p += Math.max(0, 300 - Math.abs(seg - j.from) * 10);
+        else if (seg < j.from) p += Math.max(0, 300 - (j.from - seg) * 5);
+        else p += Math.max(0, 300 - (seg - j.to + 1) * 20);
       }
       j.priority = p;
     }
-    this.queue.sort((a, b) => b.priority - a.priority);
+    this.queue.sort((a, b) => b.priority - a.priority || a.from - b.from);
+  }
+
+  private reprioritize() {
+    this.rank();
     this.pump();
   }
 
+  private carve(job: Job): Job {
+    const chunk = chunkFor(this.statsFor(job.cut), job.audioOnly);
+    if (job.to - job.from <= chunk) return job;
+    const seg = this.playheadSegment(job.cut.id);
+    const start = seg !== undefined && seg > job.from && seg < job.to ? Math.max(job.from, Math.min(seg, job.to - chunk)) : job.from;
+    const end = start + chunk;
+    const piece = (from: number, to: number): Job => ({
+      ...job,
+      id: randomUUID().slice(0, 8),
+      from,
+      to,
+      vkeys: job.vkeys.slice(from - job.from, to - job.from),
+      akeys: job.akeys.slice(from - job.from, to - job.from),
+    });
+    if (start > job.from) this.queue.push(piece(job.from, start));
+    if (end < job.to) this.queue.push(piece(end, job.to));
+    this.rank();
+    return piece(start, end);
+  }
+
+  private runnable(job: Job) {
+    if (!this.statsFor(job.cut).large) return true;
+    for (const r of this.running) if (r.cut.id === job.cut.id) return false;
+    return true;
+  }
+
   private pump() {
-    while (this.running.size < this.concurrency && this.queue.length) {
-      const job = this.queue.shift()!;
+    while (this.running.size < this.concurrency) {
+      const i = this.queue.findIndex((j) => this.runnable(j));
+      if (i < 0) break;
+      const job = this.carve(this.queue.splice(i, 1)[0]);
       this.running.add(job);
       void this.runJob(job).finally(() => {
         this.running.delete(job);
@@ -260,13 +315,22 @@ export class Renderer {
   }
 
   private async runJob(job: Job) {
-    const { cut } = job;
-    const source = cut.renderSource(job.rev);
+    const source = job.cut.leaseSource(job.rev);
     if (!source) {
       job.state = "failed";
       job.error = "the archive for this revision is no longer available";
+      console.error(`[dailies] skipped ${job.cut.name} r${job.rev} ${job.from}-${job.to}: ${job.error}`);
       return;
     }
+    try {
+      await this.renderFrom(job, source);
+    } finally {
+      source.release();
+    }
+  }
+
+  private async renderFrom(job: Job, source: SourceLease) {
+    const { cut } = job;
     job.state = "running";
     job.startedAt = Date.now();
     const dir = join(JOB_DIR, job.id);
@@ -278,16 +342,8 @@ export class Renderer {
     const durationMs = lengths.reduce((a, b) => a + b, 0);
     emit({ type: "render", cutId: cut.id, rev: job.rev, span: [job.from, job.to], progress: 0, state: "rendering" });
     let firstRenderAt: number | undefined;
-    const sourceStamp = () => {
-      try {
-        const s = statSync(source.path, { bigint: true });
-        return `${s.ino}:${s.size}:${s.mtimeNs}`;
-      } catch {
-        return "gone";
-      }
-    };
-    const stampBefore = sourceStamp();
     try {
+      if (!source.fresh) throw new Error("the cut changed while rendering");
       const encoder = await pickEncoder();
       const fps = job.audioOnly ? 1 : RENDER_SETTINGS.fps;
       const ex = exportSpan({
@@ -312,9 +368,8 @@ export class Renderer {
       job.kill = () => void taskkillTree(ex.pid);
       await ex.done;
       if (job.error === "superseded") throw new Error("superseded");
-      if (sourceStamp() !== stampBefore || (source.live && !cut.liveMatches(job.rev))) throw new Error("the cut changed while rendering");
-      const wav = readWav(join(dir, "audio.wav"));
-      const pcm = sliceWav(wav, job.to - job.from, lengths);
+      if (stampOf(source.path) !== source.stamp) throw new Error("the cut changed while rendering");
+      const pcm = spanAudio(dir, job.to - job.from, lengths);
       if (!job.audioOnly) {
         const segs = await splitSpan({ spanFile: join(dir, "span.mp4"), workDir: dir, firstSegment: job.from, segmentCount: job.to - job.from, lastSegmentMs: lengths[lengths.length - 1] });
         segs.forEach((f, i) => moveInto(f, videoFile(job.vkeys[i])));
@@ -345,24 +400,51 @@ export class Renderer {
       else {
         for (let i = 0; i < job.vkeys.length; i++) this.failures.set(`${job.vkeys[i]}:${job.akeys[i]}`, { at: Date.now(), error: msg });
         console.error(`[dailies] render ${cut.name} r${job.rev} ${job.from}-${job.to} failed: ${msg}`);
+        if (firstRenderAt === undefined && !msg.includes("changed while rendering")) {
+          const siblings = this.queue.filter((j) => j.cut.id === cut.id && j.hash === job.hash);
+          for (const j of siblings) for (let i = 0; i < j.vkeys.length; i++) this.failures.set(`${j.vkeys[i]}:${j.akeys[i]}`, { at: Date.now(), error: msg });
+          if (siblings.length) this.queue = this.queue.filter((j) => !siblings.includes(j));
+        }
         if (msg.includes("changed while rendering")) {
           for (let i = 0; i < job.vkeys.length; i++) this.failures.delete(`${job.vkeys[i]}:${job.akeys[i]}`);
-          void cut.ingest().then(() => {
+          void cut.ingestQuietly().then(() => {
             if (cut.latest && cut.liveMatches(cut.latest.n) && cut.revision(job.rev)) this.plan(cut, job.rev);
           });
         }
       }
       emit({ type: "render", cutId: cut.id, rev: job.rev, span: [job.from, job.to], progress: job.progress, state: "failed", error: msg });
     }
+    const vkeys = new Set(job.vkeys);
+    const akeys = new Set(job.akeys);
     for (const c of this.cuts()) {
       const latest = c.latest;
-      if (latest && latest.vkeys.some((k, i) => job.vkeys.includes(k) || job.akeys.includes(latest.akeys[i]))) void this.assemble(c, latest.n);
+      if (latest && latest.vkeys.some((k, i) => vkeys.has(k) || akeys.has(latest.akeys[i]))) void this.assemble(c, latest.n);
     }
     if (job.rev !== cut.latest?.n) void this.assemble(cut, job.rev);
   }
 
+  private busy(cutId: string) {
+    return [...this.running, ...this.queue].some((j) => j.cut.id === cutId && (j.state === "queued" || j.state === "running"));
+  }
+
   async assemble(cut: Cut, revN: number) {
     const key = `${cut.id}:${revN}`;
+    const last = this.assembled.get(key);
+    if (last && this.busy(cut.id)) {
+      const wait = last.at + Math.max(ASSEMBLE_MIN_GAP_MS, last.ms * 2) - Date.now();
+      if (wait > 0) {
+        if (!this.assembleTimers.has(key)) {
+          this.assembleTimers.set(
+            key,
+            setTimeout(() => {
+              this.assembleTimers.delete(key);
+              void this.assemble(cut, revN);
+            }, wait),
+          );
+        }
+        return;
+      }
+    }
     if (this.assembling.has(key)) {
       this.assembleAgain.add(key);
       return this.assembling.get(key);
@@ -422,7 +504,11 @@ export class Renderer {
       return;
     }
     const file = this.movieFile(cut.id, revN, movieKey);
-    if (!existsSync(file)) await encodeMovie(video, audio, lengths, file);
+    if (!existsSync(file)) {
+      const started = Date.now();
+      await encodeMovie(video, audio, lengths, file);
+      this.assembled.set(`${cut.id}:${revN}`, { at: Date.now(), ms: Date.now() - started });
+    }
     for (const f of [...video, ...audio]) if (f) this.touch(f);
     const movie: Movie = { cutId: cut.id, rev: revN, file, key: movieKey, stale, missing, complete: !stale.length && !missing.length, builtAt: Date.now() };
     this.movies.set(`${cut.id}:${revN}`, movie);
@@ -492,6 +578,19 @@ export class Renderer {
     if (removed) console.log(`[dailies] cache trimmed from ${(before / 1e9).toFixed(2)} GB to ${(total / 1e9).toFixed(2)} GB (${removed} files)`);
     return { before, after: total, removed };
   }
+}
+
+function spanAudio(dir: string, segmentCount: number, lengths: number[]): Buffer[] {
+  const wav = join(dir, "audio.wav");
+  if (existsSync(wav)) return sliceWav(readWav(wav), segmentCount, lengths);
+  let calls: string;
+  try {
+    calls = readFileSync(join(dir, "shim.log"), "utf8");
+  } catch {
+    throw new Error(`tsrct never ran Dailies' ffmpeg shim, so the span's audio is unknown (no ${join(dir, "shim.log")})`);
+  }
+  if (/\.wav"/i.test(calls) || /^error /m.test(calls)) throw new Error(`the span's audio was mixed but never reached Dailies (see ${join(dir, "shim.log")})`);
+  return lengths.map((ms) => Buffer.alloc(SEGMENT_PCM_BYTES(ms)));
 }
 
 export async function taskkillTree(pid: number) {

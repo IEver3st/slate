@@ -1,7 +1,8 @@
-import { existsSync, writeFileSync, copyFileSync, renameSync, rmSync, statSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync, renameSync, rmSync, statSync, readFileSync } from "node:fs";
+import { copyFile } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import { absoluteWindow, canonical, contextAt, findLayer, layerWindow, type Doc, type Layer } from "./doc";
+import { absoluteWindow, canonical, contextAt, editedValue, findLayer, isLayerHidden, layerWindow, walk, type Doc, type Layer } from "./doc";
 import { applyActions, findCli } from "./tsrct";
 import { emit } from "./events";
 import { owner } from "./settings";
@@ -234,7 +235,7 @@ function buildEdit(cut: Cut, doc: Doc, compositionId: string, req: EditRequest):
     };
   }
   if (req.kind === "hide") {
-    const before = layer.hidden === true;
+    const before = isLayerHidden(layer);
     if (before === req.hidden) throw new Error(`"${name}" is already ${req.hidden ? "hidden" : "shown"}`);
     return {
       actions: [{ type: "setFxLayerHidden", compositionId, layerId: layer.id, hidden: req.hidden }],
@@ -282,13 +283,42 @@ async function writeActions(cut: Cut, actions: unknown[], baseRev: Revision, sum
   writeFileSync(actionsFile, JSON.stringify(actions));
   try {
     const source = cut.renderSource(baseRev.n)?.path ?? cut.path;
-    const p = Bun.spawn([cli, "project", "apply", "--project", source, "--actions", actionsFile, "--output", tmp], { stdout: "pipe", stderr: "pipe", windowsHide: true });
-    const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-    if (code !== 0) throw new Error((err || out).trim().split("\n").slice(-3).join(" | ") || "tsrct project apply failed");
+    await tsrctRun(cli, ["project", "apply", "--project", source, "--actions", actionsFile, "--output", tmp], "tsrct project apply failed");
+    await unpinFonts(cut, cli, tmp);
     commitAsYou(cut, tmp, baseRev, summary, "the cut changed while your edit was being written; it was not applied");
   } finally {
     rmSync(tmp, { force: true });
     rmSync(actionsFile, { force: true });
+  }
+}
+
+async function tsrctRun(cli: string, args: string[], failure: string) {
+  const p = Bun.spawn([cli, ...args], { stdout: "pipe", stderr: "pipe", windowsHide: true });
+  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+  if (code !== 0) throw new Error((err || out).trim().split("\n").filter((l) => !l.startsWith("info:")).slice(-3).join(" | ") || failure);
+}
+
+async function unpinFonts(cut: Cut, cli: string, archive: string) {
+  const checkout = join(cut.dataDir, `unpin-${process.pid}-${Date.now()}.json`);
+  const rewritten = `${archive}.unpinned.tsrct`;
+  try {
+    await tsrctRun(cli, ["project", "checkout", "--project", archive, "--output", checkout], "tsrct project checkout failed");
+    const doc = JSON.parse(readFileSync(checkout, "utf8")) as Doc;
+    let unpinned = 0;
+    walk(doc.composition.layers, (l) => {
+      if (l.sourceText?.fontAssetId) {
+        delete l.sourceText.fontAssetId;
+        unpinned++;
+      }
+    });
+    if (!unpinned) return;
+    writeFileSync(checkout, JSON.stringify(doc));
+    await tsrctRun(cli, ["project", "commit", "--project", archive, "--file", checkout, "--output", rewritten], "tsrct project commit failed");
+    renameSync(rewritten, archive);
+    console.log(`[dailies] ${cut.name}: removed ${unpinned} font pin${unpinned === 1 ? "" : "s"} that tsrct project apply adds, so the cut still renders`);
+  } finally {
+    rmSync(checkout, { force: true });
+    rmSync(rewritten, { force: true });
   }
 }
 
@@ -423,7 +453,7 @@ function driftSince(doc: Doc, note: { expect?: Expect[] }, s: Suggestion): strin
   for (const exp of note.expect ?? []) {
     if (exp.after === "__any__" || exp.layerId !== layer.id) continue;
     const norm = (v: unknown) => (exp.path[0] === "hidden" ? v === true || undefined : v);
-    const value = exp.path.reduce<any>((o, k) => (o == null ? undefined : o[k]), layer);
+    const value = editedValue(layer, exp.path);
     if (canonical(norm(value)) !== canonical(norm(exp.after))) return `"${name}" has changed since your edit.`;
   }
   return undefined;
@@ -438,7 +468,7 @@ export async function revertTo(cut: Cut, revN: number) {
   if (rev.hash === base.hash) throw new Error(`The cut already matches r${revN}; nothing to restore`);
   const tmp = join(dirname(cut.path), `.${basename(cut.path)}.dailies-revert-${Date.now()}.tsrct`);
   try {
-    copyFileSync(rev.snapshot, tmp);
+    await copyFile(rev.snapshot, tmp);
     commitAsYou(cut, tmp, base, `Reverted to r${revN}`, `the cut changed while r${revN} was being restored; nothing was overwritten`);
   } finally {
     rmSync(tmp, { force: true });

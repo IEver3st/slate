@@ -43,7 +43,7 @@ const renderer = new Renderer(() => [...registry.cuts.values()]);
 const exporter = new Exporter();
 registry.onRevision = (cut, rev) => renderer.plan(cut, rev.n);
 registry.onSourceLost = (cut, n) => renderer.abandon(cut, n);
-
+registry.onFold = (cut, n) => renderer.dropQueued(cut, n);
 const token = randomBytes(24).toString("hex");
 const startedAt = new Date().toISOString();
 if (await alreadyRunning()) {
@@ -102,7 +102,7 @@ if (!cli || !FFMPEG_FOUND) {
 
 void Promise.all(
   [...registry.cuts.values()].map((cut) =>
-    cut.ingest().then(() => {
+    cut.ingestQuietly().then(() => {
       if (cut.latest) renderer.plan(cut, cut.latest.n);
     }),
   ),

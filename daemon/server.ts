@@ -27,6 +27,7 @@ type Caching = "immutable" | "no-cache" | "no-store";
 const CACHE_HEADER: Record<Caching, string> = { immutable: "private, max-age=31536000, immutable", "no-cache": "no-cache", "no-store": "no-store" };
 
 const building = new Map<string, Promise<void>>();
+const POSTER_SEARCH = 120;
 function buildOnce(file: string, make: () => Promise<void>) {
   let p = building.get(file);
   if (!p) {
@@ -111,6 +112,8 @@ export function cutDetail(ctx: Ctx, cut: Cut, rev?: number) {
     movie: movie ? { rev: movie.rev, key: movie.key, stale: movie.stale, missing: movie.missing, complete: movie.complete } : undefined,
     jobs: ctx.renderer.jobsFor(cut.id),
     renderError: ctx.renderer.failureFor(cut),
+    storageNotice: cut.storage?.mode === "none" ? cut.storage.reason : undefined,
+    snapshotBytes: cut.snapshotBytes(),
     export: ctx.exporter.stateFor(cut),
     notes: cut.notes.map((n) => {
       const d = displayTime(n as any, doc);
@@ -319,9 +322,18 @@ export function startServer(ctx: Ctx, port: number) {
           if (sub === "poster") {
             const rev = cut.revision(url.searchParams.has("rev") ? Number(url.searchParams.get("rev")) : undefined) ?? cut.latest;
             if (!rev) return fail(404, "no revision");
-            const s = Math.min(rev.vkeys.length - 1, Math.floor(Math.min(rev.durationMs * 0.3, 2500) / SEGMENT_MS));
+            const want = Math.min(rev.vkeys.length - 1, Math.floor(Math.min(rev.durationMs * 0.3, 2500) / SEGMENT_MS));
+            let s: number | undefined;
+            for (let d = 0; d <= POSTER_SEARCH && s === undefined; d++) {
+              for (const i of d ? [want + d, want - d] : [want]) {
+                if (i >= 0 && i < rev.vkeys.length && existsSync(videoFile(rev.vkeys[i]))) {
+                  s = i;
+                  break;
+                }
+              }
+            }
+            if (s === undefined) return fail(404, "not rendered yet");
             const seg = videoFile(rev.vkeys[s]);
-            if (!existsSync(seg)) return fail(404, "not rendered yet");
             const out = join(THUMB_CACHE, `${rev.vkeys[s]}-${POSTER_SHORT_SIDE}.jpg`);
             if (existsSync(out)) ctx.renderer.touch(out);
             else await buildOnce(out, () => extractThumb(seg, out, POSTER_SHORT_SIDE));
@@ -435,7 +447,7 @@ export function startServer(ctx: Ctx, port: number) {
           if (op === "status") {
             const state = ["working", "ready", "blocked", "idle"].includes(body.state) ? body.state : "working";
             cut.agent = { name: who.name, state, text: String(body.message ?? ""), at: new Date().toISOString() };
-            if (!cut.lastAgentTouch?.publishing) cut.lastAgentTouch = { name: who.name, at: Date.now() };
+            if (state === "working" && !cut.lastAgentTouch?.publishing) cut.lastAgentTouch = { name: who.name, at: Date.now() };
             if (typeof body.thread === "string" && body.thread) cut.addCollaborator(body.thread, who.name, linkOf(body));
             cut.saveState();
             cut.log({ author: who, kind: "status", state, text: String(body.message ?? state) });

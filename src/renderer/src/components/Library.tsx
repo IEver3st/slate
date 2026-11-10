@@ -122,7 +122,7 @@ function Strip({ cut, maxH, onSeek }: { cut: CutSummary; maxH: number; onSeek: (
           className="relative overflow-hidden rounded-[4px] bg-well"
           style={{ aspectRatio: `${l.width} / ${l.height}` }}
         >
-          <Img src={media(`/api/cuts/${cut.id}/thumb?rev=${l.n}&s=${c.s}${retry}`)} className={highlight && !c.on ? "!opacity-50" : undefined} />
+          <Img src={media(`/api/cuts/${cut.id}/thumb?rev=${l.n}&h=${l.hash}&s=${c.s}${retry}`)} className={highlight && !c.on ? "!opacity-50" : undefined} />
           {c.on && <span className="pointer-events-none absolute inset-0 rounded-[4px] shadow-[inset_0_0_0_2px_var(--color-amber)]" />}
         </button>
       ))}

@@ -103,7 +103,14 @@ function Presence({ cut, room, inline }: { cut: CutDetail; room?: number; inline
               {stale} {stale === 1 ? "second still shows" : "seconds still show"} the previous revision
             </div>
           )}
-          {cut.renderError && <div className="pointer-events-auto text-red">{cut.renderError}</div>}
+          {cut.renderError && (
+            <div className="pointer-events-auto text-red">
+              <span className="break-words">{cut.renderError}</span>{" "}
+              <button className="font-semibold text-text underline-offset-2 hover:underline" onClick={() => void api(`/api/cuts/${cut.id}/retry`, { method: "POST" })}>
+                Retry
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

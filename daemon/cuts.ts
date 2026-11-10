@@ -1,9 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, watch, linkSync, copyFileSync, rmSync, readdirSync, appendFileSync, renameSync, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, watch, linkSync, rmSync, readdirSync, appendFileSync, renameSync, type FSWatcher } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
+import { copyFile } from "node:fs/promises";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { listZip, readZipEntry } from "./zip";
-import { analyze, diffDocs, hash, type Analysis, type AssetTable, type Doc, canonical, findLayer } from "./doc";
+import { analyze, diffDocs, hash, type Analysis, type AssetTable, type Doc, canonical, editedValue, findLayer } from "./doc";
 import { cutDataDir, cutIdFor, normPath, readJson, writeJsonAtomic, REGISTRY_FILE } from "./paths";
 import { emit } from "./events";
 import { owner } from "./settings";
@@ -19,16 +20,62 @@ export function configureRender(cli: string, encoder: string) {
 export const keySignature = () => hash(RENDER_SETTINGS);
 
 export const ATTRIBUTION_MS = 5 * 60_000;
+const FOLD_MS = 30_000;
+const FOLD_SPAN_MS = 3 * 60_000;
 const SNAPSHOT_KEEP = 6;
 const SNAPSHOT_MIN = 2;
 const SNAPSHOT_BUDGET = 3_000_000_000;
-const COPY_LIMIT = 1_500_000_000;
+export const COPY_LIMIT = 1_500_000_000;
+const STABLE_WAIT_MS = 120_000;
+const ACTIVITY_KEEP = 400;
+const ACTIVITY_COMPACT_BYTES = 2_000_000;
+
+const activeLeases = new Set<string>();
+
+const gb = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
+
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export type Storage = { mode: "linked" | "copied" | "none"; reason?: string };
+export type SourceLease = { path: string; live: boolean; leased: boolean; fresh: boolean; stamp: string; release: () => void };
+
+export function stampOf(path: string) {
+  try {
+    const s = statSync(path, { bigint: true });
+    return `${s.ino}:${s.size}:${s.mtimeNs}`;
+  } catch {
+    return "gone";
+  }
+}
 
 const sameFile = (a: string, b: string) => {
   try {
     return statSync(a, { bigint: true }).ino === statSync(b, { bigint: true }).ino;
   } catch {
     return false;
+  }
+};
+
+const fileId = (path: string) => {
+  try {
+    return statSync(path, { bigint: true }).ino.toString();
+  } catch {
+    return undefined;
+  }
+};
+
+const fileSize = (path: string) => {
+  try {
+    return statSync(path).size;
+  } catch {
+    return -1;
   }
 };
 
@@ -75,8 +122,10 @@ export class Cut {
   private inflight?: Promise<Revision | undefined>;
   private ingestAgain = false;
   private inPlaceWriter = false;
+  storage?: Storage;
   onRevision?: (cut: Cut, rev: Revision) => void;
   onSourceLost?: (cut: Cut, n: number) => void;
+  onFold?: (cut: Cut, n: number) => void;
 
   constructor(path: string) {
     this.path = normPath(path);
@@ -86,28 +135,49 @@ export class Cut {
     this.dataDir = cutDataDir(this.path);
     mkdirSync(join(this.dataDir, "docs"), { recursive: true });
     mkdirSync(join(this.dataDir, "frames"), { recursive: true });
-    const state = readJson<{ revisions: Revision[]; approvedRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"] }>(join(this.dataDir, "revisions.json"), { revisions: [] });
+    const state = readJson<{ revisions: Revision[]; approvedRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"]; storage?: Storage; inPlaceWriter?: boolean }>(join(this.dataDir, "revisions.json"), { revisions: [] });
     this.revisions = state.revisions ?? [];
+    this.storage = state.storage;
+    this.inPlaceWriter = !!state.inPlaceWriter;
     this.approvedRev = state.approvedRev;
     this.agent = state.agent;
     this.collaborators = state.collaborators ?? [];
     this.notes = readJson<{ notes: Note[] }>(join(this.dataDir, "notes.json"), { notes: [] }).notes ?? [];
-    const actFile = join(this.dataDir, "activity.jsonl");
-    if (existsSync(actFile)) {
-      this.activity = readFileSync(actFile, "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .slice(-400)
-        .map((l) => {
-          try {
-            return JSON.parse(l);
-          } catch {
-            return undefined;
-          }
-        })
-        .filter(Boolean);
-    }
+    this.activity = this.loadActivity();
     this.rekey();
+    this.sweepSnapshotDir();
+  }
+
+  private snapshotFiles() {
+    return new Set(this.revisions.map((r) => r.snapshot?.toLowerCase()).filter((x): x is string => !!x));
+  }
+
+  private loadActivity(): Activity[] {
+    const file = join(this.dataDir, "activity.jsonl");
+    if (!existsSync(file)) return [];
+    let text = "";
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      return [];
+    }
+    const byId = new Map<string, Activity>();
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      try {
+        const a = JSON.parse(line) as Activity;
+        byId.set(a.id, a);
+      } catch {}
+    }
+    const entries = [...byId.values()].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+    const kept = entries.slice(-ACTIVITY_KEEP);
+    if (text.length > ACTIVITY_COMPACT_BYTES || entries.length > ACTIVITY_KEEP * 3) {
+      try {
+        writeFileSync(`${file}.tmp`, kept.map((a) => JSON.stringify(a) + "\n").join(""));
+        renameSync(`${file}.tmp`, file);
+      } catch {}
+    }
+    return kept;
   }
 
   private rekey() {
@@ -135,7 +205,7 @@ export class Cut {
   }
 
   saveState() {
-    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, approvedRev: this.approvedRev, agent: this.agent, collaborators: this.collaborators });
+    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, approvedRev: this.approvedRev, agent: this.agent, collaborators: this.collaborators, storage: this.storage, inPlaceWriter: this.inPlaceWriter || undefined });
   }
 
   saveNotes() {
@@ -230,7 +300,7 @@ export class Cut {
 
   scheduleIngest(delay = 0) {
     clearTimeout(this.ingestTimer);
-    this.ingestTimer = setTimeout(() => void this.ingest(), delay);
+    this.ingestTimer = setTimeout(() => void this.ingestQuietly(), delay);
   }
 
   ingest(): Promise<Revision | undefined> {
@@ -253,62 +323,106 @@ export class Cut {
     return this.inflight;
   }
 
-  private async waitStable(): Promise<{ size: number; mtimeMs: number } | undefined> {
+  ingestQuietly(): Promise<Revision | undefined> {
+    return this.ingest().catch((e) => {
+      console.error(`[dailies] could not ingest ${this.name}: ${e instanceof Error ? e.message : e}`);
+      emit({ type: "cut", cutId: this.id });
+      return undefined;
+    });
+  }
+
+  private stamp() {
+    try {
+      const s = statSync(this.path);
+      return { size: s.size, mtimeMs: s.mtimeMs };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async waitStable(): Promise<{ stat?: { size: number; mtimeMs: number }; stable: boolean }> {
+    const started = Date.now();
     let prev: { size: number; mtimeMs: number } | undefined;
-    for (let i = 0; i < 40; i++) {
-      if (!existsSync(this.path)) {
+    let missingSince: number | undefined;
+    let announced = false;
+    while (Date.now() - started < STABLE_WAIT_MS) {
+      const cur = this.stamp();
+      if (!cur) {
+        missingSince ??= Date.now();
+        if (Date.now() - missingSince > 12_000) return { stable: false };
         await sleep(300);
         continue;
       }
-      const s = statSync(this.path);
-      const cur = { size: s.size, mtimeMs: s.mtimeMs };
-      if (prev && prev.size === cur.size && prev.mtimeMs === cur.mtimeMs) return cur;
+      missingSince = undefined;
+      if (prev && prev.size === cur.size && prev.mtimeMs === cur.mtimeMs) return { stat: cur, stable: true };
+      if (prev && !announced && Date.now() - started > 10_000) {
+        announced = true;
+        console.log(`[dailies] ${this.name} is still being written (${gb(cur.size)} so far); waiting for it to settle`);
+      }
       prev = cur;
       await sleep(250);
     }
-    return prev;
+    return { stat: prev, stable: false };
   }
 
   private async ingestOnce(): Promise<Revision | undefined> {
-    const stat = await this.waitStable();
+    const { stat, stable } = await this.waitStable();
     if (!stat) {
       emit({ type: "cut", cutId: this.id });
       return;
     }
-    const prevSnapshot = this.latest?.snapshot;
-    const inPlace = !!prevSnapshot && sameFile(prevSnapshot, this.path);
-    const incoming = this.freeze(stat.size, inPlace || this.inPlaceWriter);
-    const source = incoming ?? this.path;
+    if (!stable) console.error(`[dailies] ${this.name} kept changing for ${STABLE_WAIT_MS / 1000} s; reading it anyway`);
+    const movedSince = () => {
+      const now = this.stamp();
+      return { gone: !now, moved: !now || now.mtimeMs !== stat.mtimeMs || now.size !== stat.size };
+    };
     let loaded: Loaded | undefined;
     let lastErr: unknown;
     for (let attempt = 0; attempt < 8; attempt++) {
       try {
-        loaded = loadArchive(source);
+        loaded = loadArchive(this.path);
         break;
       } catch (e) {
         lastErr = e;
         await sleep(400);
       }
     }
+    const read = movedSince();
     if (!loaded) {
-      if (incoming) rmSync(incoming, { force: true });
+      if (read.moved && !read.gone) {
+        this.ingestAgain = true;
+        return;
+      }
       console.error(`[dailies] cannot read ${this.path}: ${lastErr}`);
       return;
     }
-    const after = statSync(this.path);
-    if (after.mtimeMs !== stat.mtimeMs || after.size !== stat.size) {
-      if (incoming) rmSync(incoming, { force: true });
+    if (read.moved) {
       this.ingestAgain = true;
       return;
     }
     const prev = this.latest;
     if (prev && prev.hash === loaded.hash) {
-      if (incoming) rmSync(incoming, { force: true });
-      if (prev.mtimeMs !== stat.mtimeMs) {
+      const id = fileId(this.path);
+      if (prev.mtimeMs !== stat.mtimeMs || prev.fileId !== id) {
         prev.mtimeMs = stat.mtimeMs;
         prev.fileSize = stat.size;
+        prev.fileId = id;
         this.saveState();
       }
+      return;
+    }
+    const prevSnapshot = prev?.snapshot;
+    const inPlace = !!prevSnapshot && sameFile(prevSnapshot, this.path);
+    const id = fileId(this.path);
+    if (this.inPlaceWriter && !inPlace && id && prev?.fileId && prev.fileId !== id) {
+      this.inPlaceWriter = false;
+      console.log(`[dailies] ${this.name} is saved by replacing the file again; snapshots are hardlinks again`);
+    }
+    const incoming = await this.freeze(stat, inPlace || this.inPlaceWriter);
+    const torn = !!incoming && (fileId(this.path) !== id || fileSize(incoming) !== stat.size);
+    if (torn || movedSince().moved) {
+      if (incoming) rmSync(incoming, { force: true });
+      this.ingestAgain = true;
       return;
     }
     if (inPlace && prev?.snapshot) {
@@ -320,36 +434,35 @@ export class Cut {
       console.error(`[dailies] ${this.name} was rewritten in place; r${prev.n} can no longer be restored and future snapshots are copies`);
       this.onSourceLost?.(this, prev.n);
     }
-    const n = (prev?.n ?? 0) + 1;
+    const author = this.attribute(stat);
+    const folding = !!prev && (!prev.snapshot || !!incoming) && this.foldable(prev, author.author);
+    const base = folding ? this.revisions[this.revisions.length - 2] : prev;
+    const n = folding ? prev!.n : (prev?.n ?? 0) + 1;
     let snapshot: string | undefined;
     if (incoming) {
-      snapshot = join(this.snapshotDir, `r${n}.tsrct`);
-      try {
-        renameSync(incoming, snapshot);
-      } catch {
-        snapshot = join(this.snapshotDir, `r${n}-${Date.now()}.tsrct`);
-        renameSync(incoming, snapshot);
-      }
+      const target = join(this.snapshotDir, `r${n}.tsrct`);
+      snapshot = existsSync(target) ? join(this.snapshotDir, `r${n}-${Date.now()}.tsrct`) : target;
+      renameSync(incoming, snapshot);
     }
     writeFileSync(join(this.dataDir, "docs", `r${n}.json.gz`), gzipSync(JSON.stringify({ doc: loaded.doc, assets: loaded.assets })));
     writeFileSync(this.rawDocFile(n), loaded.raw);
     this.docs.set(n, { doc: loaded.doc, assets: loaded.assets });
     const analysis = analyze(loaded.doc, loaded.assets, RENDER_SETTINGS);
     this.analyses.set(n, analysis);
-    const prevAnalysis = prev ? this.analysisFor(prev.n) : undefined;
+    const baseAnalysis = base ? this.analysisFor(base.n) : undefined;
     const changedSegments: number[] = [];
     for (let s = 0; s < analysis.segments; s++) {
-      if (!prevAnalysis || prevAnalysis.vkeys[s] !== analysis.vkeys[s] || prevAnalysis.akeys[s] !== analysis.akeys[s]) changedSegments.push(s);
+      if (!baseAnalysis || baseAnalysis.vkeys[s] !== analysis.vkeys[s] || baseAnalysis.akeys[s] !== analysis.akeys[s]) changedSegments.push(s);
     }
-    const author = this.attribute(stat);
+    const known = author.author.kind !== "unknown" || !folding ? author : { author: prev!.author, summary: prev!.summary, addresses: prev!.addresses, published: author.published };
     const rev: Revision = {
       n,
       hash: loaded.hash,
       at: nowIso(),
-      author: author.author,
-      summary: author.summary,
-      addresses: author.addresses,
-      changes: prev ? diffDocs(this.docFor(prev.n)?.doc, loaded.doc) : [],
+      author: known.author,
+      summary: known.summary,
+      addresses: known.addresses,
+      changes: base ? diffDocs(this.docFor(base.n)?.doc, loaded.doc) : [],
       changedSegments,
       durationMs: analysis.durationMs,
       width: loaded.doc.dimensions?.width ?? 1920,
@@ -359,19 +472,58 @@ export class Cut {
       keySig: keySignature(),
       fileSize: stat.size,
       mtimeMs: stat.mtimeMs,
+      fileId: id,
       snapshot,
-      published: author.published || undefined,
+      published: known.published || undefined,
+      saves: folding ? (prev!.saves ?? 1) + 1 : undefined,
+      firstAt: folding ? (prev!.firstAt ?? prev!.at) : undefined,
     };
-    this.revisions.push(rev);
+    if (folding) {
+      this.revisions[this.revisions.length - 1] = rev;
+      this.onFold?.(this, n);
+      for (const note of this.notes) if (note.overwrittenIn === n) {
+        note.overwrittenIn = undefined;
+        (note as { conflict?: string }).conflict = undefined;
+      }
+    } else this.revisions.push(rev);
+    this.saveState();
     this.pruneSnapshots();
     this.checkOverwrites(rev, loaded.doc);
-    this.markAddressed(rev, author.addresses);
+    this.markAddressed(rev, known.addresses);
     this.saveState();
-    this.log({ author: rev.author, kind: "revision", rev: n, text: rev.summary ?? describeChanges(rev) });
+    const text = rev.summary ?? describeChanges(rev);
+    if (folding) this.relog(n, { author: rev.author, text });
+    else this.log({ author: rev.author, kind: "revision", rev: n, text });
     emit({ type: "revision", cutId: this.id, n });
     emit({ type: "cuts" });
     this.onRevision?.(this, rev);
     return rev;
+  }
+
+  private foldable(prev: Revision, next: Author) {
+    if (prev.published || prev.author.kind === "you" || next.kind === "you") return false;
+    if (prev.author.kind === "agent" && next.kind === "agent" && prev.author.name !== next.name) return false;
+    const now = Date.now();
+    if (now - Date.parse(prev.at) > FOLD_MS || now - Date.parse(prev.firstAt ?? prev.at) > FOLD_SPAN_MS) return false;
+    if (prev.n === this.approvedRev || this.pinned.has(prev.n)) return false;
+    return !this.notes.some((x) => x.rev === prev.n || x.thread.some((t) => t.rev === prev.n));
+  }
+
+
+  private relog(n: number, update: { author: Author; text: string }) {
+    const at = nowIso();
+    const entry = [...this.activity].reverse().find((a) => a.kind === "revision" && a.rev === n);
+    if (!entry) {
+      this.log({ ...update, kind: "revision", rev: n });
+      return;
+    }
+    Object.assign(entry, update, { at });
+    this.activity.splice(this.activity.indexOf(entry), 1);
+    this.activity.push(entry);
+    try {
+      appendFileSync(join(this.dataDir, "activity.jsonl"), JSON.stringify(entry) + "\n");
+    } catch {}
+    emit({ type: "activity", cutId: this.id });
   }
 
   private markAddressed(rev: Revision, ids?: string[]) {
@@ -393,9 +545,13 @@ export class Cut {
 
   async publishFromAgent(name: string, summary?: string, addresses?: string[]): Promise<{ rev?: Revision; reason?: string }> {
     this.lastAgentTouch = { name, at: Date.now(), summary, addresses, publishing: true };
-    const made = await this.ingest();
-    const touch = this.lastAgentTouch;
-    if (touch?.publishing) this.lastAgentTouch = { name, at: touch.at };
+    let made: Revision | undefined;
+    try {
+      made = await this.ingest();
+    } finally {
+      const touch = this.lastAgentTouch;
+      if (touch?.publishing) this.lastAgentTouch = { name, at: touch.at };
+    }
     if (made?.published && made.author.kind === "agent" && made.author.name === name) return { rev: made };
     let r: Revision | undefined;
     let reason = "there is no revision yet";
@@ -446,49 +602,134 @@ export class Cut {
     return join(this.dataDir, "snapshots");
   }
 
-  private freeze(size: number, copy: boolean): string | undefined {
+  private setStorage(next: Storage) {
+    const changed = this.storage?.mode !== next.mode || this.storage?.reason !== next.reason;
+    this.storage = next;
+    if (changed && next.reason) console.error(`[dailies] ${this.name}: ${next.reason}`);
+  }
+
+  private async freeze(stat: { size: number }, copy: boolean): Promise<string | undefined> {
     mkdirSync(this.snapshotDir, { recursive: true });
     const target = join(this.snapshotDir, `incoming-${process.pid}.tsrct`);
     rmSync(target, { force: true });
+    let linkError: unknown;
     if (!copy) {
       try {
         linkSync(this.path, target);
+        this.setStorage({ mode: "linked" });
         return target;
-      } catch {}
+      } catch (e) {
+        linkError = e;
+      }
     }
-    if (size <= COPY_LIMIT) {
-      try {
-        copyFileSync(this.path, target);
-        return target;
-      } catch {}
+    const why = copy ? "This cut is saved in place, so Dailies has to copy each save" : `This drive can't hardlink the cut (${linkError instanceof Error ? linkError.message : linkError}), so Dailies has to copy each save`;
+    if (stat.size > COPY_LIMIT) {
+      this.setStorage({ mode: "none", reason: `${why}, and at ${gb(stat.size)} it is over the ${gb(COPY_LIMIT)} copy limit. Dailies can't keep restore points for it, and saving during a render restarts that render.` });
+      return undefined;
     }
-    return undefined;
+    try {
+      const started = Date.now();
+      await copyFile(this.path, target);
+      if (Date.now() - started > 2000) console.log(`[dailies] copied ${gb(stat.size)} of ${this.name} for its snapshot in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      this.setStorage({ mode: "copied" });
+      return target;
+    } catch (e) {
+      rmSync(target, { force: true });
+      this.setStorage({ mode: "none", reason: `${why}, and the copy failed (${e instanceof Error ? e.message : e}). Dailies can't keep restore points for it right now.` });
+      return undefined;
+    }
   }
 
-  private pruneSnapshots() {
-    const keep = new Set<number>();
-    let bytes = 0;
-    for (const r of [...this.revisions].reverse()) {
-      if (!r.snapshot || !existsSync(r.snapshot)) continue;
-      const size = sameFile(r.snapshot, this.path) ? 0 : r.fileSize;
-      if (keep.size >= SNAPSHOT_MIN && (keep.size >= SNAPSHOT_KEEP || bytes + size > SNAPSHOT_BUDGET)) break;
-      keep.add(r.n);
-      bytes += size;
+  private sealed(path: string, r: Revision) {
+    const before = stampOf(path);
+    if (!sameFile(path, this.path)) return { stamp: before, fresh: before !== "gone" };
+    let matches = false;
+    try {
+      const s = statSync(path);
+      matches = s.size === r.fileSize && s.mtimeMs === r.mtimeMs;
+    } catch {}
+    return { stamp: before, fresh: matches && stampOf(path) === before };
+  }
+
+  leaseSource(n: number): SourceLease | undefined {
+    const r = this.revision(n);
+    const source = this.renderSource(n);
+    if (!r || !source) return undefined;
+    const lease = join(this.snapshotDir, `lease-${process.pid}-${randomUUID().slice(0, 8)}.tsrct`);
+    try {
+      mkdirSync(this.snapshotDir, { recursive: true });
+      linkSync(source.path, lease);
+    } catch {
+      return { ...source, ...this.sealed(source.path, r), leased: false, release: () => {} };
     }
-    if (this.approvedRev !== undefined) keep.add(this.approvedRev);
-    for (const n of this.pinned) keep.add(n);
-    const referenced = new Set(this.revisions.map((r) => r.snapshot?.toLowerCase()).filter(Boolean));
+    const key = lease.toLowerCase();
+    activeLeases.add(key);
+    let released = false;
+    return {
+      path: lease,
+      live: source.live,
+      leased: true,
+      ...this.sealed(lease, r),
+      release: () => {
+        if (released) return;
+        released = true;
+        try {
+          rmSync(lease, { force: true });
+        } catch {
+        } finally {
+          activeLeases.delete(key);
+        }
+      },
+    };
+  }
+
+  private sweepSnapshotDir(referenced?: Set<string>) {
     let files: string[] = [];
     try {
       files = readdirSync(this.snapshotDir);
     } catch {}
+    const orphaned = (f: string, key: string) => {
+      const owned = /^(lease|incoming)-(\d+)[-.]/i.exec(f);
+      if (!owned) return !!referenced && /^r\d+(-\d+)?\.tsrct$/i.test(f) && !referenced.has(key);
+      const pid = Number(owned[2]);
+      if (pid !== process.pid) return !pidAlive(pid);
+      return owned[1].toLowerCase() === "lease" && !activeLeases.has(key);
+    };
     for (const f of files) {
       const p = join(this.snapshotDir, f);
-      if (!/^r\d+(-\d+)?\.tsrct$/i.test(f) || referenced.has(p.toLowerCase())) continue;
+      if (!orphaned(f, p.toLowerCase())) continue;
       try {
         rmSync(p, { force: true });
       } catch {}
     }
+  }
+
+  snapshotBytes() {
+    let bytes = 0;
+    for (const r of this.revisions) if (r.snapshot && existsSync(r.snapshot) && !sameFile(r.snapshot, this.path)) bytes += r.fileSize;
+    return bytes;
+  }
+
+  private pruneSnapshots() {
+    const has = (r?: Revision): r is Revision => !!r?.snapshot && existsSync(r.snapshot);
+    const cost = (r: Revision) => (sameFile(r.snapshot!, this.path) ? 0 : r.fileSize);
+    const keep = new Set<number>();
+    let bytes = 0;
+    const hold = (r: Revision) => {
+      if (keep.has(r.n)) return;
+      keep.add(r.n);
+      bytes += cost(r);
+    };
+    const latest = this.latest;
+    if (has(latest)) hold(latest);
+    for (const r of this.revisions) if ((r.n === this.approvedRev || this.pinned.has(r.n)) && has(r)) hold(r);
+    for (const r of [...this.revisions].reverse()) {
+      if (keep.has(r.n) || !has(r)) continue;
+      const size = cost(r);
+      if (keep.size >= SNAPSHOT_KEEP || (keep.size >= SNAPSHOT_MIN && bytes + size > SNAPSHOT_BUDGET)) break;
+      hold(r);
+    }
+    this.sweepSnapshotDir(this.snapshotFiles());
     for (const r of this.revisions) {
       if (!keep.has(r.n) && r.snapshot) {
         try {
@@ -522,7 +763,7 @@ export class Cut {
       for (const exp of note.expect) {
         const layer = findLayer(doc, exp.layerId);
         const norm = (v: unknown) => (exp.path[0] === "hidden" ? v === true || undefined : v);
-        const value = norm(layer ? exp.path.reduce<any>((o, k) => (o == null ? undefined : o[k]), layer) : undefined);
+        const value = norm(editedValue(layer, exp.path));
         const reverted = canonical(value) === canonical(norm(exp.before));
         const diverged = exp.after !== "__any__" && canonical(value) !== canonical(norm(exp.after));
         if (!layer || reverted || diverged) {
@@ -547,7 +788,7 @@ export class Cut {
       path: this.path,
       name: this.name,
       folder: this.folder,
-      latest: l ? { n: l.n, at: l.at, author: l.author, durationMs: l.durationMs, width: l.width, height: l.height, summary: l.summary ?? describeChanges(l), changed: l.changedSegments, segments: l.vkeys.length } : undefined,
+      latest: l ? { n: l.n, hash: l.hash.slice(0, 10), at: l.at, author: l.author, durationMs: l.durationMs, width: l.width, height: l.height, summary: l.summary ?? describeChanges(l), changed: l.changedSegments, segments: l.vkeys.length } : undefined,
       recent: this.revisions.slice(-6).map((r) => ({ n: r.n, at: r.at, author: r.author })),
       openNotes: this.notes.filter((n) => n.status === "open" || n.status === "claimed").length,
       draftNotes: this.notes.filter((n) => n.status === "draft").length,
@@ -577,6 +818,7 @@ export class Registry {
   roots: string[];
   onRevision?: (cut: Cut, rev: Revision) => void;
   onSourceLost?: (cut: Cut, n: number) => void;
+  onFold?: (cut: Cut, n: number) => void;
 
   constructor() {
     const saved = readJson<{ cuts: string[]; roots?: string[] }>(REGISTRY_FILE, { cuts: [] });
@@ -597,6 +839,7 @@ export class Registry {
     cut = new Cut(path);
     cut.onRevision = (c, r) => this.onRevision?.(c, r);
     cut.onSourceLost = (c, n) => this.onSourceLost?.(c, n);
+    cut.onFold = (c, n) => this.onFold?.(c, n);
     this.cuts.set(id, cut);
     cut.startWatching();
     cut.scheduleIngest(0);

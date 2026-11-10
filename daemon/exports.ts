@@ -6,7 +6,7 @@ import { FFMPEG, FFMPEG_FOUND, pickEncoder, probeVideo } from "./media";
 import { JOB_DIR, readJson, writeJsonAtomic } from "./paths";
 import { emit } from "./events";
 import { SHIM, taskkillTree } from "./render";
-import { nowIso, type Cut } from "./cuts";
+import { nowIso, stampOf, type Cut, type SourceLease } from "./cuts";
 import type { Author } from "./types";
 
 export const EXPORT_PROFILE = { resolution: "4k", fps: 60, label: "4K60" } as const;
@@ -37,15 +37,6 @@ type Job = {
 
 const TEMP_PATTERN = /\.[0-9a-f]{8}\.part\.mp4/i;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-function sourceStamp(path: string) {
-  try {
-    const s = statSync(path, { bigint: true });
-    return `${s.ino}:${s.size}:${s.mtimeNs}`;
-  } catch {
-    return "gone";
-  }
-}
 
 function tail(msg: string) {
   return msg.length > 600 ? `...${msg.slice(-600)}` : msg;
@@ -236,13 +227,21 @@ export class Exporter {
   }
 
   private async run(job: Job) {
-    const { cut } = job;
-    const folder = dirname(cut.path);
-    const source = cut.renderSource(job.rev);
+    const source = job.cut.leaseSource(job.rev);
     if (!source) {
       this.fail(job, `r${job.rev} is no longer kept on disk`);
       return;
     }
+    try {
+      await this.runFrom(job, source);
+    } finally {
+      source.release();
+    }
+  }
+
+  private async runFrom(job: Job, source: SourceLease) {
+    const { cut } = job;
+    const folder = dirname(cut.path);
     if (!this.swept.has(folder.toLowerCase())) {
       this.swept.add(folder.toLowerCase());
       this.sweep(folder);
@@ -258,11 +257,11 @@ export class Exporter {
     const dir = join(JOB_DIR, `export-${job.id}`);
     console.log(`[dailies] export ${cut.name} r${job.rev} from ${source.path}${source.live ? " (live file)" : ""} to ${file} with ${encoder}`);
     this.changed(job, "running");
-    const stampBefore = sourceStamp(source.path);
     let lastEmit = 0;
     try {
       const cli = tryFindCli();
       if (!cli) throw new Error("the Tesseract CLI is not installed");
+      if (!source.fresh) throw new Error(`r${job.rev} changed on disk before the export started; export it again`);
       const ex = exportSpan({
         cli,
         project: source.path,
@@ -291,7 +290,7 @@ export class Exporter {
       if (job.cancelled) job.kill();
       await ex.done;
       if (job.cancelled) throw new Error("cancelled");
-      if (sourceStamp(source.path) !== stampBefore || (source.live && !cut.liveMatches(job.rev))) throw new Error(`r${job.rev} changed on disk while exporting; export it again`);
+      if (stampOf(source.path) !== source.stamp) throw new Error(`r${job.rev} changed on disk while exporting; export it again`);
       if (!existsSync(temp)) throw new Error("the export finished without writing a file");
       job.phase = "finishing";
       this.changed(job, "running");

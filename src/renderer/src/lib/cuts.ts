@@ -8,5 +8,5 @@ export const needsYou = (c: CutSummary) => !c.missing && !isWorking(c) && (c.age
 
 export function cutPoster(c: CutSummary) {
   if (!c.latest) return undefined;
-  return media(`/api/cuts/${c.id}/poster?rev=${c.latest.n}${c.render.rendering ? `&r=${c.render.ready}` : ""}`);
+  return media(`/api/cuts/${c.id}/poster?rev=${c.latest.n}&h=${c.latest.hash}${c.render.rendering ? `&r=${c.render.ready}` : ""}`);
 }

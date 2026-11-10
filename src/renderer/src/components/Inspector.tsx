@@ -164,7 +164,7 @@ export function Inspector({ cut, time, paused, selected, onEdit }: { cut: CutDet
                   {l.sourceMs !== undefined ? `, source ${tc(l.sourceMs)}` : ""}
                 </div>
               </div>
-              <IconButton label={l.hidden ? "Show layer" : "Hide layer"} onClick={() => onEdit({ kind: "hide", layerId: l.id, hidden: !l.hidden })}>
+              <IconButton label={l.hiddenBy ? `Show group ${l.hiddenBy.name}` : l.hidden ? "Show layer" : "Hide layer"} onClick={() => onEdit({ kind: "hide", layerId: l.hiddenBy?.id ?? l.id, hidden: !l.hidden })}>
                 {l.hidden ? <EyeOff /> : <Eye />}
               </IconButton>
             </div>

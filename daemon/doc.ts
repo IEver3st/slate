@@ -61,6 +61,14 @@ export function mapLocal(layer: Layer, parentTime: number): number | undefined {
   return parentTime;
 }
 
+export const isLayerHidden = (layer: Layer) => layer.isHidden === true || layer.hidden === true;
+
+export function editedValue(layer: Layer | undefined, path: string[]): unknown {
+  if (!layer) return undefined;
+  if (path[0] === "hidden") return isLayerHidden(layer) || undefined;
+  return path.reduce<any>((o, k) => (o == null ? undefined : o[k]), layer);
+}
+
 export function walk(layers: Layer[], visit: (layer: Layer, path: Layer[]) => void, path: Layer[] = []) {
   for (const layer of layers) {
     visit(layer, path);
@@ -265,34 +273,36 @@ export type ContextLayer = {
   asset?: string;
   sourceMs?: number;
   hidden?: boolean;
+  hiddenBy?: { id: number; name: string };
   volume?: number;
 };
 
 export function contextAt(doc: Doc, t: number): ContextLayer[] {
   const out: ContextLayer[] = [];
-  const visit = (layers: Layer[], parentTime: number | undefined, path: string[], hiddenAbove: boolean) => {
+  const visit = (layers: Layer[], parentTime: number | undefined, path: string[], hiddenBy: { id: number; name: string } | undefined) => {
     for (const layer of layers) {
       const w = layerWindow(layer);
       if (parentTime === undefined) continue;
       if (!(parentTime >= w.start && parentTime < w.end)) continue;
       const local = mapLocal(layer, parentTime);
-      const hidden = hiddenAbove || layer.hidden === true;
       const item: ContextLayer = {
         id: layer.id,
         name: layer.name ?? `${layer.type} ${layer.id}`,
         type: layer.type ?? "Layer",
         path,
       };
-      if (hidden) item.hidden = true;
+      const own = isLayerHidden(layer);
+      if (own || hiddenBy) item.hidden = true;
+      if (!own && hiddenBy) item.hiddenBy = hiddenBy;
       if (layer.type === "Text" && typeof layer.sourceText?.text === "string") item.text = layer.sourceText.text;
       if (layer.source?.assetId) item.asset = layer.source.assetId;
       if ((layer.type === "Video" || layer.type === "Audio") && local !== undefined) item.sourceMs = Math.round(local);
       if (typeof layer.volume === "number") item.volume = layer.volume;
       if (layer.type !== "Group") out.push(item);
-      if (Array.isArray(layer.layers)) visit(layer.layers, layer.type === "Group" ? local : parentTime, [...path, item.name], hidden);
+      if (Array.isArray(layer.layers)) visit(layer.layers, layer.type === "Group" ? local : parentTime, [...path, item.name], hiddenBy ?? (own ? { id: layer.id, name: item.name } : undefined));
     }
   };
-  visit(doc.composition.layers, t, [], false);
+  visit(doc.composition.layers, t, [], undefined);
   return out;
 }
 
@@ -319,6 +329,7 @@ const FIELD_LABELS: Record<string, string> = {
   transform: "transform",
   volume: "volume",
   hidden: "visibility",
+  isHidden: "visibility",
   source: "media",
   effects: "effects",
   rect: "shape",
@@ -342,6 +353,8 @@ export function diffDocs(before: Doc | undefined, after: Doc): LayerChange[] {
   };
   const da = dynFor(before);
   const db = dynFor(after);
+  let pinned = 0;
+  let unpinned = 0;
   for (const [id, { layer }] of b) {
     const prev = a.get(id);
     if (!prev) {
@@ -352,7 +365,19 @@ export function diffDocs(before: Doc | undefined, after: Doc): LayerChange[] {
     const keys = new Set([...Object.keys(layer), ...Object.keys(prev.layer)]);
     for (const k of keys) {
       if (k === "layers") continue;
-      if (canonical(layer[k]) !== canonical(prev.layer[k])) fields.add(FIELD_LABELS[k] ?? k);
+      if (canonical(layer[k]) === canonical(prev.layer[k])) continue;
+      if (k === "sourceText") {
+        const x = prev.layer.sourceText ?? {};
+        const y = layer.sourceText ?? {};
+        const differs = (f: string) => canonical(x[f]) !== canonical(y[f]);
+        const fontKeys = ["fontAssetId", "fontFamily", "fontStyle"];
+        if (differs("text")) fields.add("text");
+        if (differs("fontFamily") || differs("fontStyle")) fields.add("font");
+        if (differs("fontAssetId")) y.fontAssetId ? pinned++ : unpinned++;
+        if ([...new Set([...Object.keys(x), ...Object.keys(y)])].some((f) => f !== "text" && !fontKeys.includes(f) && differs(f))) fields.add("text style");
+        continue;
+      }
+      fields.add(FIELD_LABELS[k] ?? k);
     }
     if ((da.get(id) ?? "") !== (db.get(id) ?? "")) fields.add("animation");
     if (fields.size) {
@@ -370,6 +395,9 @@ export function diffDocs(before: Doc | undefined, after: Doc): LayerChange[] {
   for (const [id, { layer }] of a) {
     if (!b.has(id)) changes.push({ id, name: layer.name ?? String(id), type: layer.type ?? "Layer", kind: "removed", fields: [] });
   }
+  const layers = (n: number) => `${n} text layer${n === 1 ? "" : "s"}`;
+  if (pinned) changes.push({ id: -1, name: layers(pinned), type: "Text", kind: "changed", fields: ["font pins added"] });
+  if (unpinned) changes.push({ id: -2, name: layers(unpinned), type: "Text", kind: "changed", fields: ["font pins removed"] });
   return changes;
 }
 
@@ -411,7 +439,7 @@ export function timelineItems(doc: Doc): TrackItem[] {
       type: layer.type ?? "Layer",
       start: Number.isFinite(w.start) ? w.start : 0,
       end: Number.isFinite(w.end) ? w.end : total,
-      hidden: layer.hidden === true || undefined,
+      hidden: isLayerHidden(layer) || undefined,
       volume: typeof layer.volume === "number" ? layer.volume : undefined,
       text: texts.length ? texts.join(" / ") : undefined,
       asset: layer.source?.assetId,
