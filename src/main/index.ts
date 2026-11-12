@@ -8,20 +8,23 @@ import { createUpdater, type UpdateState } from "./updater";
 import { createPreferences } from "./preferences";
 import type { Alert, SettingsSnapshot } from "../shared/preferences";
 import { resolveTheme } from "../shared/themes";
+import { appHome } from "../home";
 
 type DaemonInfo = { port: number; token: string; pid?: number; root?: string };
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const APP_DIR = process.env.DAILIES_HOME ? resolve(process.env.DAILIES_HOME) : join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Dailies");
+const APP_DIR = appHome();
 const RELEASED = existsSync(join(ROOT, "release.json"));
-if (process.env.DAILIES_HOME) app.setPath("userData", join(APP_DIR, RELEASED ? "electron-release" : "electron"));
-else if (!RELEASED) app.setPath("userData", join(app.getPath("appData"), "Dailies Dev"));
+if (process.env.SLATE_HOME) app.setPath("userData", join(APP_DIR, RELEASED ? "electron-release" : "electron"));
+else if (!RELEASED) app.setPath("userData", join(app.getPath("appData"), "Slate Dev"));
 const prefs = createPreferences(APP_DIR);
 const DAEMON_FILE = join(APP_DIR, "daemon.json");
 const RESOURCES = join(ROOT, "resources");
 const startHidden = process.argv.includes("--background");
-const INSTALLED = process.platform === "win32" && basename(process.execPath).toLowerCase() === "dailies.exe";
-const APP_ID = INSTALLED ? "dev.ever3st.dailies" : "dev.ever3st.dailies.dev";
+const EXE = basename(process.execPath).toLowerCase();
+const LEGACY_SHELL = EXE === "dailies.exe";
+const INSTALLED = process.platform === "win32" && (EXE === "slate.exe" || LEGACY_SHELL);
+const APP_ID = LEGACY_SHELL ? "dev.ever3st.dailies" : INSTALLED ? "dev.ever3st.slate" : "dev.ever3st.slate.dev";
 const TOAST_CLSID = "{7ABCD69B-5294-4735-9F68-17BB9994399C}";
 const START_MENU = join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs");
 
@@ -43,13 +46,13 @@ const updater = createUpdater({
   },
   onChange: (state) => {
     refreshTray?.();
-    win?.webContents.send("dailies:update", state);
+    win?.webContents.send("slate:update", state);
   },
 });
 let refreshTray: (() => void) | undefined;
 
 function registerShortcut() {
-  const link = join(START_MENU, "Dailies.lnk");
+  const link = join(START_MENU, "Slate.lnk");
   const details = {
     target: process.execPath,
     cwd: dirname(process.execPath),
@@ -77,7 +80,7 @@ app.setAppUserModelId(APP_ID);
 if (INSTALLED) {
   app.setToastActivatorCLSID(TOAST_CLSID);
   try {
-    registerShortcut();
+    if (!LEGACY_SHELL) registerShortcut();
   } catch {}
 }
 const registering = process.argv.includes("--register");
@@ -104,16 +107,16 @@ function readDaemonFile(): DaemonInfo | undefined {
 async function healthy(info: DaemonInfo | undefined) {
   if (!info) return false;
   try {
-    const r = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { "x-dailies-token": info.token }, signal: AbortSignal.timeout(1500) });
+    const r = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { "x-slate-token": info.token }, signal: AbortSignal.timeout(1500) });
     const j: any = await r.json();
-    return j.app === "dailies" && j.authed === true;
+    return j.app === "slate" && j.authed === true;
   } catch {
     return false;
   }
 }
 
 function bunPath() {
-  const candidates = [process.env.DAILIES_BUN, join(homedir(), ".bun", "bin", "bun.exe")];
+  const candidates = [process.env.SLATE_BUN, join(homedir(), ".bun", "bin", "bun.exe")];
   return candidates.find((p): p is string => !!p && existsSync(p)) ?? "bun";
 }
 
@@ -177,7 +180,7 @@ function ensureDaemon() {
 }
 
 async function connectDaemon(): Promise<DaemonInfo> {
-  const failed = () => new Error(`The Dailies service did not start. See ${join(APP_DIR, "daemon.log")}.`);
+  const failed = () => new Error(`The Slate service did not start. See ${join(APP_DIR, "daemon.log")}.`);
   for (let attempt = 0; attempt < 4; attempt++) {
     const current = readDaemonFile();
     if (await healthy(current)) {
@@ -231,7 +234,7 @@ function createWindow() {
     minHeight: 720,
     show: false,
     backgroundColor: theme.palette.ink,
-    title: "Dailies",
+    title: "Slate",
     icon: join(RESOURCES, process.platform === "win32" ? "icon.ico" : "icon.png"),
     titleBarStyle: "hidden",
     titleBarOverlay: { color: theme.palette.ink, symbolColor: theme.symbol, height: 48 },
@@ -270,7 +273,7 @@ function showWindow(cutId?: string) {
   if (!win) createWindow();
   if (cutId) {
     pendingNav = cutId;
-    win!.webContents.send("dailies:navigate", cutId);
+    win!.webContents.send("slate:navigate", cutId);
   }
   if (win!.isMinimized()) win!.restore();
   win!.show();
@@ -279,7 +282,7 @@ function showWindow(cutId?: string) {
 
 function openSettings(page?: string) {
   showWindow();
-  const send = () => win?.webContents.send("dailies:openSettings", page);
+  const send = () => win?.webContents.send("slate:openSettings", page);
   if (win?.webContents.isLoading()) win.webContents.once("did-finish-load", send);
   else send();
 }
@@ -299,13 +302,13 @@ function snapshot(): SettingsSnapshot {
 }
 
 function broadcastSettings() {
-  win?.webContents.send("dailies:settings", snapshot());
+  win?.webContents.send("slate:settings", snapshot());
 }
 
 prefs.onChange(broadcastSettings);
 prefs.onChange(paintWindow);
 nativeTheme.on("updated", paintWindow);
-ipcMain.on("dailies:initialTheme", (e) => {
+ipcMain.on("slate:initialTheme", (e) => {
   e.returnValue = prefs.get().theme;
 });
 
@@ -323,11 +326,11 @@ function updateItems(u: UpdateState): Electron.MenuItemConstructorOptions[] {
 function buildTray() {
   const image = nativeImage.createFromPath(join(RESOURCES, "tray.png"));
   tray = new Tray(image);
-  tray.setToolTip("Dailies");
+  tray.setToolTip("Slate");
   const refresh = () =>
     tray!.setContextMenu(
       Menu.buildFromTemplate([
-        { label: "Open Dailies", click: () => showWindow() },
+        { label: "Open Slate", click: () => showWindow() },
         { type: "separator" },
         ...updateItems(updater.state()),
         {
@@ -340,7 +343,7 @@ function buildTray() {
         { label: "Open cache folder", click: () => void shell.openPath(APP_DIR) },
         { type: "separator" },
         {
-          label: "Quit Dailies",
+          label: "Quit Slate",
           click: () => {
             quitting = true;
             app.quit();
@@ -382,7 +385,7 @@ async function watchEvents() {
 async function onEvent(e: any) {
   if (!daemon) return;
   if (e.type === "revision" && e.cutId) {
-    const r = await fetch(`http://127.0.0.1:${daemon.port}/api/cuts/${e.cutId}`, { headers: { "x-dailies-token": daemon.token } }).catch(() => undefined);
+    const r = await fetch(`http://127.0.0.1:${daemon.port}/api/cuts/${e.cutId}`, { headers: { "x-slate-token": daemon.token } }).catch(() => undefined);
     const d: any = await r?.json().catch(() => undefined);
     const rev = d?.revisions?.at(-1);
     if (!rev || seenRevisions.get(e.cutId) === rev.n) return;
@@ -403,7 +406,7 @@ async function onEvent(e: any) {
   if (e.type === "export" && e.state === "failed") {
     notify("sound", `Export of r${e.rev} of ${e.cut ?? "your cut"} failed`, String(e.error ?? "Open the cut to see why."), e.cutId);
   }
-  if (e.type === "focus" && e.cutId && win?.isVisible() && prefs.get().followAgents) win.webContents.send("dailies:navigate", e.cutId);
+  if (e.type === "focus" && e.cutId && win?.isVisible() && prefs.get().followAgents) win.webContents.send("slate:navigate", e.cutId);
 }
 
 function notify(alert: Alert, title: string, body: string, cutId: string, onClick?: () => void) {
@@ -414,47 +417,47 @@ function notify(alert: Alert, title: string, body: string, cutId: string, onClic
   n.show();
 }
 
-ipcMain.handle("dailies:connection", async () => {
+ipcMain.handle("slate:connection", async () => {
   if (!daemon || !(await healthy(daemon))) daemon = await ensureDaemon();
   return { base: `http://127.0.0.1:${daemon.port}`, token: daemon.token };
 });
-ipcMain.handle("dailies:updateState", () => updater.state());
-ipcMain.handle("dailies:applyUpdate", () => updater.apply());
-ipcMain.handle("dailies:checkUpdates", () => updater.check());
-ipcMain.handle("dailies:rollback", () => updater.rollback());
-ipcMain.handle("dailies:settings", () => snapshot());
-ipcMain.handle("dailies:setPreferences", (_e, patch: unknown) => {
+ipcMain.handle("slate:updateState", () => updater.state());
+ipcMain.handle("slate:applyUpdate", () => updater.apply());
+ipcMain.handle("slate:checkUpdates", () => updater.check());
+ipcMain.handle("slate:rollback", () => updater.rollback());
+ipcMain.handle("slate:settings", () => snapshot());
+ipcMain.handle("slate:setPreferences", (_e, patch: unknown) => {
   prefs.set(patch);
   return snapshot();
 });
-ipcMain.handle("dailies:setStartWithWindows", (_e, on: unknown) => {
+ipcMain.handle("slate:setStartWithWindows", (_e, on: unknown) => {
   if (INSTALLED && typeof on === "boolean") setLogin(on);
   return snapshot();
 });
-ipcMain.handle("dailies:pickFolder", async () => {
+ipcMain.handle("slate:pickFolder", async () => {
   const r = await dialog.showOpenDialog(win!, { title: "Add a project folder", properties: ["openDirectory"] });
   return r.canceled ? undefined : r.filePaths[0];
 });
-ipcMain.handle("dailies:openFolder", (_e, path: string) => {
+ipcMain.handle("slate:openFolder", (_e, path: string) => {
   if (typeof path === "string" && existsSync(path)) void shell.openPath(path);
 });
-ipcMain.handle("dailies:openLog", (_e, which: string) => {
+ipcMain.handle("slate:openLog", (_e, which: string) => {
   const file = which === "updates" ? updater.logFile : which === "daemon" ? join(APP_DIR, "daemon.log") : undefined;
   if (file && existsSync(file)) void shell.openPath(file);
 });
-ipcMain.handle("dailies:takeNavigation", () => {
+ipcMain.handle("slate:takeNavigation", () => {
   const nav = pendingNav;
   pendingNav = undefined;
   return nav;
 });
-ipcMain.handle("dailies:openFile", async () => {
+ipcMain.handle("slate:openFile", async () => {
   const r = await dialog.showOpenDialog(win!, { title: "Open a Tesseract project", properties: ["openFile", "multiSelections"], filters: [{ name: "Tesseract project", extensions: ["tsrct"] }] });
   return r.canceled ? [] : r.filePaths;
 });
-ipcMain.handle("dailies:reveal", (_e, path: string) => {
+ipcMain.handle("slate:reveal", (_e, path: string) => {
   if (typeof path === "string" && existsSync(path)) shell.showItemInFolder(path);
 });
-ipcMain.handle("dailies:openExternal", (_e, url: string) => {
+ipcMain.handle("slate:openExternal", (_e, url: string) => {
   if (typeof url === "string" && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(url)) void shell.openExternal(url);
 });
 
@@ -469,7 +472,7 @@ void app.whenReady().then(async () => {
   try {
     daemon = await ensureDaemon();
   } catch (e) {
-    dialog.showErrorBox("Dailies", e instanceof Error ? e.message : String(e));
+    dialog.showErrorBox("Slate", e instanceof Error ? e.message : String(e));
   }
   createWindow();
   void watchEvents();

@@ -16,16 +16,16 @@ async function alreadyRunning(): Promise<boolean> {
   const info = readJson<{ port?: number; token?: string; pid?: number }>(DAEMON_FILE, {});
   if (!info.port || !info.token) return false;
   try {
-    const r = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { "x-dailies-token": info.token }, signal: AbortSignal.timeout(800) });
+    const r = await fetch(`http://127.0.0.1:${info.port}/api/health`, { headers: { "x-slate-token": info.token }, signal: AbortSignal.timeout(800) });
     const j: any = await r.json();
-    return j.app === "dailies" && j.authed === true && j.pid !== process.pid;
+    return j.app === "slate" && j.authed === true && j.pid !== process.pid;
   } catch {
     return false;
   }
 }
 
 if (await alreadyRunning()) {
-  console.log("[dailies] daemon already running");
+  console.log("[slate] daemon already running");
   process.exit(0);
 }
 
@@ -47,11 +47,11 @@ registry.onFold = (cut, n) => renderer.dropQueued(cut, n);
 const token = randomBytes(24).toString("hex");
 const startedAt = new Date().toISOString();
 if (await alreadyRunning()) {
-  console.log("[dailies] daemon already running");
+  console.log("[slate] daemon already running");
   process.exit(0);
 }
 let server: ReturnType<typeof startServer> | undefined;
-const firstPort = Number(process.env.DAILIES_PORT || DEFAULT_PORT);
+const firstPort = Number(process.env.SLATE_PORT || DEFAULT_PORT);
 let port = firstPort;
 for (let i = 0; i < 20 && !server; i++, port++) {
   try {
@@ -59,25 +59,25 @@ for (let i = 0; i < 20 && !server; i++, port++) {
   } catch {}
 }
 if (!server) {
-  console.error("[dailies] no free port");
+  console.error("[slate] no free port");
   process.exit(1);
 }
 if (server.port !== firstPort) {
   const rival = await fetch(`http://127.0.0.1:${firstPort}/api/health`, { signal: AbortSignal.timeout(800) })
     .then((r) => r.json())
     .catch(() => undefined);
-  if (rival?.app === "dailies" && rival.home === HOME_ID) {
-    console.log(`[dailies] another daemon holds ${firstPort}; exiting`);
+  if (rival?.app === "slate" && rival.home === HOME_ID) {
+    console.log(`[slate] another daemon holds ${firstPort}; exiting`);
     server.stop(true);
     process.exit(0);
   }
 }
 writeJsonAtomic(DAEMON_FILE, { port: server.port, token, pid: process.pid, startedAt, version: VERSION, root: resolve(daemonDir, "..") });
-console.log(`[dailies] daemon ${VERSION} on http://127.0.0.1:${server.port} (tsrct ${cliV}, encoder ${encoder}, ui ${uiDir() ?? "not built yet"})`);
+console.log(`[slate] daemon ${VERSION} on http://127.0.0.1:${server.port} (tsrct ${cliV}, encoder ${encoder}, ui ${uiDir() ?? "not built yet"})`);
 
 if (!cli || !FFMPEG_FOUND) {
   const missing = [!cli && "the Tesseract CLI", !FFMPEG_FOUND && "ffmpeg"].filter(Boolean).join(" and ");
-  console.log(`[dailies] rendering is off until ${missing} is installed`);
+  console.log(`[slate] rendering is off until ${missing} is installed`);
   const runs = async (exe: string | undefined, args: string[]) => {
     if (!exe) return false;
     try {
@@ -93,7 +93,7 @@ if (!cli || !FFMPEG_FOUND) {
     if (probing) return;
     probing = true;
     if ((!cli && (await runs(tryFindCli(), ["--version"]))) || (!FFMPEG_FOUND && (await runs(findFfmpeg(), ["-version"])))) {
-      console.log("[dailies] a missing tool is installed now; restarting to pick it up");
+      console.log("[slate] a missing tool is installed now; restarting to pick it up");
       shutdown();
     }
     probing = false;
@@ -126,7 +126,7 @@ process.on("SIGTERM", shutdown);
 setInterval(() => {
   const info = readJson<{ pid?: number }>(DAEMON_FILE, {});
   if (info.pid && info.pid !== process.pid) {
-    console.log(`[dailies] daemon ${info.pid} took over; exiting`);
+    console.log(`[slate] daemon ${info.pid} took over; exiting`);
     process.exit(0);
   }
 }, 2000);

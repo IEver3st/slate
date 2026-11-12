@@ -1,6 +1,9 @@
 import { existsSync, statSync, mkdirSync, rmSync } from "node:fs";
+import { diffPair } from "./compare";
+import { checksFor, peaksFor } from "./checks";
+import { measureTarget } from "./target";
 import { join, extname, resolve, sep } from "node:path";
-import { subscribe, type DailiesEvent, emit } from "./events";
+import { subscribe, type SlateEvent, emit } from "./events";
 import type { Registry, Cut } from "./cuts";
 import type { Renderer } from "./render";
 import type { Exporter } from "./exports";
@@ -80,7 +83,7 @@ async function serveFile(req: Request, path: string, type: string | undefined, c
   return new Response(file, { headers: { ...headers, "content-length": String(size) } });
 }
 
-const waiters = new Set<{ cutId?: string; resolve: (e: DailiesEvent) => void }>();
+const waiters = new Set<{ cutId?: string; resolve: (e: SlateEvent) => void }>();
 subscribe((e) => {
   for (const w of [...waiters]) {
     if ("cutId" in e && w.cutId && e.cutId !== w.cutId) continue;
@@ -198,10 +201,10 @@ export function startServer(ctx: Ctx, port: number) {
         return serveFile(req, join(uiDir, "index.html"), undefined, "no-cache");
       }
 
-      const token = req.headers.get("x-dailies-token") ?? url.searchParams.get("token");
-      if (p === "/api/health") return json({ ok: true, app: "dailies", version: ctx.version, pid: process.pid, home: HOME_ID, startedAt: ctx.startedAt, authed: token === ctx.token });
+      const token = req.headers.get("x-slate-token") ?? url.searchParams.get("token");
+      if (p === "/api/health") return json({ ok: true, app: "slate", version: ctx.version, pid: process.pid, home: HOME_ID, startedAt: ctx.startedAt, authed: token === ctx.token });
       if (token !== ctx.token) return fail(401, "missing or wrong token");
-      seeClient(req.headers.get("x-dailies-client"), req.headers.get("x-dailies-t3") === "1");
+      seeClient(req.headers.get("x-slate-client"), req.headers.get("x-slate-t3") === "1");
 
       try {
         const body: any = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => ({})) : {};
@@ -314,9 +317,10 @@ export function startServer(ctx: Ctx, port: number) {
             if (!rev || !Number.isInteger(s) || s < 0 || s >= rev.vkeys.length) return fail(404, "no such second");
             const seg = videoFile(rev.vkeys[s]);
             if (!existsSync(seg)) return fail(404, "not rendered yet");
-            const out = join(THUMB_CACHE, `${rev.vkeys[s]}-${THUMB_SHORT_SIDE}.jpg`);
+            const side = url.searchParams.get("size") === "poster" ? POSTER_SHORT_SIDE : THUMB_SHORT_SIDE;
+            const out = join(THUMB_CACHE, `${rev.vkeys[s]}-${side}.jpg`);
             if (existsSync(out)) ctx.renderer.touch(out);
-            else await buildOnce(out, () => extractThumb(seg, out));
+            else await buildOnce(out, () => extractThumb(seg, out, side));
             return serveFile(req, out, "image/jpeg", url.searchParams.has("rev") ? "immutable" : "no-store");
           }
           if (sub === "poster") {
@@ -364,6 +368,26 @@ export function startServer(ctx: Ctx, port: number) {
             return json({ id, export: ctx.exporter.stateFor(cut) });
           }
           if (sub === "publish" && req.method === "POST") return json(await publish(cut));
+          if (sub === "target" && req.method === "POST") {
+            const box = await measureTarget(cut, Number(body.rev ?? cut.latest?.n), Number(body.t ?? 0), Number(body.layerId)).catch((e) => ({ error: String(e?.message ?? e) }));
+            return json(box && "error" in box ? { box: null, error: box.error } : { box });
+          }
+          if (sub === "checks") {
+            const c = await checksFor(cut, Number(url.searchParams.get("rev") ?? cut.latest?.n));
+            return c ? json(c) : fail(404, "no such revision");
+          }
+          if (sub === "peaks") {
+            const p = peaksFor(cut, Number(url.searchParams.get("rev") ?? cut.latest?.n));
+            return p ? json(p) : fail(404, "no such revision");
+          }
+          if (sub === "diff") {
+            const d = diffPair(cut, Number(url.searchParams.get("a")), Number(url.searchParams.get("b")));
+            return d ? json(d) : fail(404, "no such revisions");
+          }
+          if (sub === "seen" && req.method === "POST") {
+            if (cut.markSeen(Number(body.rev ?? cut.latest?.n))) emit({ type: "cuts" });
+            return json({ ok: true, seenRev: cut.seenRev });
+          }
           if (sub === "approve" && req.method === "POST") {
             await approve(cut, Number(body.rev ?? cut.latest?.n));
             return json({ ok: true });
@@ -396,6 +420,9 @@ export function startServer(ctx: Ctx, port: number) {
                 status: body.status === "open" ? "open" : "draft",
                 frame: decodeDataUrl(body.frame),
                 annotatedFrame: decodeDataUrl(body.annotatedFrame),
+                tag: body.tag,
+                target: body.target,
+                against: body.against,
               });
               if (!note.frame) {
                 const f = await frameFor(ctx, cut, note.t, note.rev).catch(() => undefined);
@@ -414,7 +441,7 @@ export function startServer(ctx: Ctx, port: number) {
               return serveFile(req, f, "image/png", "no-cache");
             }
             if (noteId && segs[5] === "reply" && req.method === "POST") return json(reply(cut, noteId, String(body.text ?? ""), YOU, body.status as NoteStatus | undefined));
-            if (noteId && req.method === "PATCH") return json(updateNote(cut, noteId, body));
+            if (noteId && req.method === "PATCH") return json(updateNote(cut, noteId, { ...body, annotatedFrame: body.annotatedFrame === undefined ? undefined : (decodeDataUrl(body.annotatedFrame) ?? null) }));
             if (noteId && req.method === "DELETE") {
               deleteNote(cut, noteId);
               return json({ ok: true });
@@ -442,7 +469,7 @@ export function startServer(ctx: Ctx, port: number) {
             return json({ cut: cut.path, id: cut.id, revision: cut.latest?.n, render: ctx.renderer.progressFor(cut), openNotes: cut.notes.filter((n) => n.status === "open" || n.status === "claimed").length, threadLinked: !!body.thread });
           }
           const cut = resolveCut(ctx, cutRef, true);
-          if (!cut) return fail(404, `unknown cut: ${cutRef}. Call dailies_open first.`);
+          if (!cut) return fail(404, `unknown cut: ${cutRef}. Call slate_open first.`);
           const who = agentOf(body);
           if (op === "status") {
             const state = ["working", "ready", "blocked", "idle"].includes(body.state) ? body.state : "working";
@@ -475,7 +502,7 @@ export function startServer(ctx: Ctx, port: number) {
               render: ctx.renderer.progressFor(cut),
               warning: rev
                 ? undefined
-                : `Nothing was published and no notes were marked addressed: ${reason}. Save or commit the project first. If a note needs no change, answer it with dailies_reply (status addressed or wontfix) instead.`,
+                : `Nothing was published and no notes were marked addressed: ${reason}. Save or commit the project first. If a note needs no change, answer it with slate_reply (status addressed or wontfix) instead.`,
             });
           }
           if (op === "feedback") return json(feedbackFor(cut, { status: body.status ?? url.searchParams.get("status") ?? undefined, since: body.since ?? url.searchParams.get("since") ?? undefined }));
@@ -503,7 +530,7 @@ export function startServer(ctx: Ctx, port: number) {
               found = pending();
             }
             const appr = approvedSince();
-            return json({ now: new Date().toISOString(), approved: appr ? appr.rev : undefined, changed: found.map((n) => ({ id: n.id, kind: n.kind, status: n.status, text: clip(n.text, 140) })), hint: found.length || appr ? "Call dailies_feedback for details." : `Nothing new yet. Wait again or end your turn; Dailies messages a linked T3 thread when ${owner("the user")} sends notes.` });
+            return json({ now: new Date().toISOString(), approved: appr ? appr.rev : undefined, changed: found.map((n) => ({ id: n.id, kind: n.kind, status: n.status, text: clip(n.text, 140) })), hint: found.length || appr ? "Call slate_feedback for details." : `Nothing new yet. Wait again or end your turn; Slate messages a linked T3 thread when ${owner("the user")} sends notes.` });
           }
           if (op === "reply") {
             const n = reply(cut, String(body.note), String(body.text ?? ""), who, body.status as NoteStatus | undefined, cut.latest?.n);

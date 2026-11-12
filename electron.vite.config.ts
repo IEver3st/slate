@@ -1,18 +1,21 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { defineConfig } from "electron-vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { appHome } from "./src/home";
 
-const appDir = process.env.DAILIES_HOME ? resolve(process.env.DAILIES_HOME) : join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Dailies");
+delete process.env.ELECTRON_RUN_AS_NODE;
+process.chdir(realpathSync.native(process.cwd()));
+
+const appDir = appHome();
 
 function daemonTarget() {
   try {
     const { port } = JSON.parse(readFileSync(join(appDir, "daemon.json"), "utf8"));
     if (port) return `http://127.0.0.1:${port}`;
   } catch {}
-  return `http://127.0.0.1:${process.env.DAILIES_PORT ?? 47800}`;
+  return `http://127.0.0.1:${process.env.SLATE_PORT ?? 47800}`;
 }
 
 export default defineConfig({
@@ -28,7 +31,6 @@ export default defineConfig({
     plugins: [react(), tailwindcss()],
     server: {
       port: 5173,
-      strictPort: true,
       proxy: {
         "/api": {
           get target() {

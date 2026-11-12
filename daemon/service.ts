@@ -1,6 +1,6 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { APP_DIR, AUDIO_CACHE, FRAME_CACHE, MOVIE_CACHE, POSTER_CACHE, SLATE_CACHE, THUMB_CACHE, VIDEO_CACHE, readJson, writeJsonAtomic } from "./paths";
+import { APP_DIR, AUDIO_CACHE, FRAME_CACHE, MOVIE_CACHE, POSTER_CACHE, BLANK_CACHE, THUMB_CACHE, VIDEO_CACHE, readJson, writeJsonAtomic } from "./paths";
 import { emit } from "./events";
 
 export type ServiceSettings = { cacheGb: number; renderSlots: number };
@@ -8,7 +8,7 @@ export type ServiceSettings = { cacheGb: number; renderSlots: number };
 export const CACHE_CHOICES = [5, 10, 20, 50, 100, 200];
 export const SLOT_CHOICES = [1, 2, 3, 4, 6, 8];
 export const SERVICE_DEFAULTS: ServiceSettings = {
-  cacheGb: CACHE_CHOICES.includes(Number(process.env.DAILIES_CACHE_GB)) ? Number(process.env.DAILIES_CACHE_GB) : 20,
+  cacheGb: CACHE_CHOICES.includes(Number(process.env.SLATE_CACHE_GB)) ? Number(process.env.SLATE_CACHE_GB) : 20,
   renderSlots: 3,
 };
 
@@ -48,7 +48,7 @@ const KINDS = [
   { id: "video", label: "Video segments", dirs: [VIDEO_CACHE] },
   { id: "movies", label: "Assembled cuts", dirs: [MOVIE_CACHE] },
   { id: "audio", label: "Audio", dirs: [AUDIO_CACHE] },
-  { id: "stills", label: "Frames and thumbnails", dirs: [FRAME_CACHE, THUMB_CACHE, POSTER_CACHE, SLATE_CACHE] },
+  { id: "stills", label: "Frames and thumbnails", dirs: [FRAME_CACHE, THUMB_CACHE, POSTER_CACHE, BLANK_CACHE] },
 ];
 
 function sizeOf(dir: string) {

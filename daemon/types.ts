@@ -40,6 +40,9 @@ export type Suggestion =
   | { kind: "actions"; actions: unknown[]; summary: string };
 
 export type NoteStatus = "draft" | "open" | "claimed" | "addressed" | "resolved" | "wontfix";
+export type NoteTag = "timing" | "text" | "audio" | "framing" | "remove";
+export const NOTE_TAGS: NoteTag[] = ["timing", "text", "audio", "framing", "remove"];
+export type NoteTarget = { layerId: number; name: string; box?: { x: number; y: number; w: number; h: number } };
 
 export type ThreadEntry = { id: string; author: Author; text: string; at: string; rev?: number; status?: NoteStatus };
 
@@ -58,6 +61,9 @@ export type Note = {
   humanAt?: string;
   annotations: Annotation[];
   context: ContextLayer[];
+  tag?: NoteTag;
+  target?: NoteTarget;
+  against?: number;
   frame?: string;
   annotatedFrame?: string;
   suggestion?: Suggestion;
@@ -90,6 +96,7 @@ export type CutSummary = {
   draftNotes: number;
   agent?: { name: string; state: string; text: string; at: string };
   approvedRev?: number;
+  seenRev?: number;
   render: { ready: number; total: number; rendering: boolean; failed: number };
   poster?: string;
   missing?: boolean;

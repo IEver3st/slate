@@ -1,40 +1,40 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-contextBridge.exposeInMainWorld("dailies", {
-  initialTheme: ipcRenderer.sendSync("dailies:initialTheme"),
-  connection: () => ipcRenderer.invoke("dailies:connection"),
-  takeNavigation: () => ipcRenderer.invoke("dailies:takeNavigation"),
-  openFile: () => ipcRenderer.invoke("dailies:openFile"),
-  reveal: (path: string) => ipcRenderer.invoke("dailies:reveal", path),
-  openExternal: (url: string) => ipcRenderer.invoke("dailies:openExternal", url),
-  updateState: () => ipcRenderer.invoke("dailies:updateState"),
-  applyUpdate: () => ipcRenderer.invoke("dailies:applyUpdate"),
-  checkUpdates: () => ipcRenderer.invoke("dailies:checkUpdates"),
-  rollback: () => ipcRenderer.invoke("dailies:rollback"),
-  settings: () => ipcRenderer.invoke("dailies:settings"),
-  setPreferences: (patch: unknown) => ipcRenderer.invoke("dailies:setPreferences", patch),
-  setStartWithWindows: (on: boolean) => ipcRenderer.invoke("dailies:setStartWithWindows", on),
-  pickFolder: () => ipcRenderer.invoke("dailies:pickFolder"),
-  openFolder: (path: string) => ipcRenderer.invoke("dailies:openFolder", path),
-  openLog: (which: string) => ipcRenderer.invoke("dailies:openLog", which),
+contextBridge.exposeInMainWorld("slate", {
+  initialTheme: ipcRenderer.sendSync("slate:initialTheme"),
+  connection: () => ipcRenderer.invoke("slate:connection"),
+  takeNavigation: () => ipcRenderer.invoke("slate:takeNavigation"),
+  openFile: () => ipcRenderer.invoke("slate:openFile"),
+  reveal: (path: string) => ipcRenderer.invoke("slate:reveal", path),
+  openExternal: (url: string) => ipcRenderer.invoke("slate:openExternal", url),
+  updateState: () => ipcRenderer.invoke("slate:updateState"),
+  applyUpdate: () => ipcRenderer.invoke("slate:applyUpdate"),
+  checkUpdates: () => ipcRenderer.invoke("slate:checkUpdates"),
+  rollback: () => ipcRenderer.invoke("slate:rollback"),
+  settings: () => ipcRenderer.invoke("slate:settings"),
+  setPreferences: (patch: unknown) => ipcRenderer.invoke("slate:setPreferences", patch),
+  setStartWithWindows: (on: boolean) => ipcRenderer.invoke("slate:setStartWithWindows", on),
+  pickFolder: () => ipcRenderer.invoke("slate:pickFolder"),
+  openFolder: (path: string) => ipcRenderer.invoke("slate:openFolder", path),
+  openLog: (which: string) => ipcRenderer.invoke("slate:openLog", which),
   onSettings: (fn: (s: unknown) => void) => {
     const handler = (_e: unknown, s: unknown) => fn(s);
-    ipcRenderer.on("dailies:settings", handler);
-    return () => ipcRenderer.off("dailies:settings", handler);
+    ipcRenderer.on("slate:settings", handler);
+    return () => ipcRenderer.off("slate:settings", handler);
   },
   onOpenSettings: (fn: (page?: string) => void) => {
     const handler = (_e: unknown, page?: string) => fn(page);
-    ipcRenderer.on("dailies:openSettings", handler);
-    return () => ipcRenderer.off("dailies:openSettings", handler);
+    ipcRenderer.on("slate:openSettings", handler);
+    return () => ipcRenderer.off("slate:openSettings", handler);
   },
   onUpdate: (fn: (state: unknown) => void) => {
     const handler = (_e: unknown, state: unknown) => fn(state);
-    ipcRenderer.on("dailies:update", handler);
-    return () => ipcRenderer.off("dailies:update", handler);
+    ipcRenderer.on("slate:update", handler);
+    return () => ipcRenderer.off("slate:update", handler);
   },
   onNavigate: (fn: (cutId: string) => void) => {
     const handler = (_e: unknown, cutId: string) => fn(cutId);
-    ipcRenderer.on("dailies:navigate", handler);
-    return () => ipcRenderer.off("dailies:navigate", handler);
+    ipcRenderer.on("slate:navigate", handler);
+    return () => ipcRenderer.off("slate:navigate", handler);
   },
 });

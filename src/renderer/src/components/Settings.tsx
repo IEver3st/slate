@@ -126,8 +126,8 @@ function useUpdates(active: boolean) {
   const [state, setState] = useState<UpdateState>();
   useEffect(() => {
     if (!active) return;
-    void window.dailies?.updateState?.().then(setState);
-    return window.dailies?.onUpdate?.(setState);
+    void window.slate?.updateState?.().then(setState);
+    return window.slate?.onUpdate?.(setState);
   }, [active]);
   return state;
 }
@@ -186,7 +186,7 @@ function ConnectedAgents({ s }: { s: SetupState }) {
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-[13.5px] font-semibold">No agents connected yet</div>
-          <div className="mt-0.5 text-[12.5px] leading-snug text-dim">Connect Claude Code, Codex or T3 Code. The agent installs the Dailies tools and shows up here.</div>
+          <div className="mt-0.5 text-[12.5px] leading-snug text-dim">Connect Claude Code, Codex or T3 Code. The agent installs the Slate tools and shows up here.</div>
         </div>
         <Button variant="primary" onClick={() => openSetup()}>
           <Plug className="size-4" />
@@ -312,7 +312,7 @@ const SHORTCUTS: { section: string; title: string; keys: string[][] }[] = [
     keys: [["Home"], ["End"]],
   },
   { section: "Playback", title: "Volume up or down", keys: [["↑"], ["↓"]] },
-  { section: "Playback", title: "Mute", keys: [["M"]] },
+  { section: "Playback", title: "Mute", keys: [["Shift", "M"]] },
   { section: "Loop", title: "Set loop in", keys: [["I"]] },
   { section: "Loop", title: "Set loop out", keys: [["O"]] },
   { section: "Loop", title: "Clear loop", keys: [["X"]] },
@@ -320,6 +320,7 @@ const SHORTCUTS: { section: string; title: string; keys: string[][] }[] = [
   { section: "Draw on the frame", title: "Arrow", keys: [["A"]] },
   { section: "Draw on the frame", title: "Freehand", keys: [["D"]] },
   { section: "Draw on the frame", title: "Pin", keys: [["P"]] },
+  { section: "Draw on the frame", title: "Pick the layer the note is about", keys: [["T"], ["Alt", "Click"]] },
   {
     section: "Draw on the frame",
     title: "Cancel the tool, then the drawing",
@@ -336,8 +337,17 @@ const SHORTCUTS: { section: string; title: string; keys: string[][] }[] = [
     keys: [["Ctrl", "Enter"]],
   },
   { section: "Notes", title: "Previous or next note", keys: [["["], ["]"]] },
+  { section: "Notes", title: "Drop a marker without stopping", keys: [["M"]] },
+  { section: "Notes", title: "Drop a Timing, Text, Audio, Framing or Cut marker", keys: [["1"], ["2"], ["3"], ["4"], ["5"]] },
+  { section: "Notes", title: "Write the next unwritten marker", keys: [["Tab"]] },
+  { section: "Notes", title: "Check fixes: looks good, not yet, skip", keys: [["Enter"], ["R"], ["→"]] },
   { section: "View", title: "Phone safe zones", keys: [["S"]] },
   { section: "View", title: "Compare with an earlier revision", keys: [["C"]] },
+  { section: "Compare", title: "Compare with any revision", keys: [["Shift", "Click"]] },
+  { section: "Compare", title: "Hold to flip to the other revision", keys: [["V"]] },
+  { section: "Compare", title: "Hear the other revision", keys: [["H"]] },
+  { section: "Compare", title: "Next or previous change", keys: [["G"], ["Shift", "G"]] },
+  { section: "View", title: "Keyboard shortcuts", keys: [["?"]] },
   { section: "View", title: "Full screen", keys: [["F"]] },
   {
     section: "Anywhere",
@@ -463,7 +473,7 @@ function Folders({ s, onRemove }: { s: ServiceState; onRemove: (path: string) =>
             <div className={cn("text-[12.5px]", r.exists ? "text-dim" : "text-red")}>{r.exists ? plural(r.projects, "project") : "Folder is missing"}</div>
           </div>
           {r.exists && (
-            <IconButton label="Show in Explorer" onClick={() => void window.dailies?.openFolder?.(r.path)}>
+            <IconButton label="Show in Explorer" onClick={() => void window.slate?.openFolder?.(r.path)}>
               <FolderOpen />
             </IconButton>
           )}
@@ -559,7 +569,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
       page: "general",
       section: "Notifications",
       title: "Notify while focused",
-      description: "Otherwise notifications only appear while Dailies is in the background.",
+      description: "Otherwise notifications only appear while Slate is in the background.",
       keywords: "notify alert foreground",
       prefs: ["alertWhenFocused"],
       control: toggle("alertWhenFocused", "Notify while focused"),
@@ -593,7 +603,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         page: "agents",
         section: "Connect",
         title: "Connect prompt",
-        description: agentsSetup.mcp.exists ? "Paste it into Claude Code, Codex or T3 Code to register the Dailies tools." : "This development build has no agent tools. Install the app first.",
+        description: agentsSetup.mcp.exists ? "Paste it into Claude Code, Codex or T3 Code to register the Slate tools." : "This development build has no agent tools. Install the app first.",
         keywords: "connect agent prompt copy mcp claude codex",
         control: <CopyButton text={() => connectPrompt(agentsSetup)} label="Copy prompt" icon={Copy} />,
       });
@@ -602,7 +612,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         page: "agents",
         section: "Connect",
         title: "Invite someone else",
-        description: "A prompt for someone else's Windows PC. They need read access to the Dailies repo.",
+        description: "A prompt for someone else's Windows PC. They need read access to the Slate repo.",
         keywords: "invite share collaborator friend",
         control: <CopyButton text={() => invitePrompt(agentsSetup)} label="Copy invite" icon={UserPlus} />,
       });
@@ -622,7 +632,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
       page: "agents",
       section: "Behavior",
       title: "Follow agents",
-      description: "Jump to a cut when an agent opens it for review with dailies_open.",
+      description: "Jump to a cut when an agent opens it for review with slate_open.",
       keywords: "focus navigate open",
       prefs: ["followAgents"],
       control: toggle("followAgents", "Follow agents"),
@@ -641,7 +651,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
       page: "general",
       section: "Window",
       title: "Close button",
-      description: p.closeAction === "tray" ? "Hidden in the tray, Dailies keeps rendering and notifying you." : "Closing the window stops rendering and notifications.",
+      description: p.closeAction === "tray" ? "Hidden in the tray, Slate keeps rendering and notifying you." : "Closing the window stops rendering and notifications.",
       keywords: "quit exit tray minimize",
       prefs: ["closeAction"],
       control: (
@@ -650,7 +660,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
           value={p.closeAction}
           options={[
             { value: "tray", label: "Hide to tray" },
-            { value: "quit", label: "Quit Dailies" },
+            { value: "quit", label: "Quit Slate" },
           ]}
           onChange={(v) => set({ closeAction: v })}
         />
@@ -661,7 +671,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
       page: "general",
       section: "Confirmations",
       title: "Remove confirmation",
-      description: "Require a second click before a project is removed from Dailies.",
+      description: "Require a second click before a project is removed from Slate.",
       keywords: "confirm ask remove close project",
       prefs: ["confirmRemove"],
       control: toggle("confirmRemove", "Remove confirmation"),
@@ -753,12 +763,12 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         page: "folders",
         section: "Watched folders",
         title: "Add a folder",
-        description: "Dailies lists every .tsrct up to two folders deep, grouped by the first folder.",
+        description: "Slate lists every .tsrct up to two folders deep, grouped by the first folder.",
         keywords: "library scan directory tesseract",
         control: (
           <Button
             onClick={async () => {
-              const dir = await window.dailies?.pickFolder?.();
+              const dir = await window.slate?.pickFolder?.();
               if (dir) void service.call("/roots", { add: dir });
             }}
           >
@@ -823,7 +833,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         title: "Service log",
         description: `Running since ${ago(s.startedAt)}. Render failures and cache trims are written here.`,
         keywords: "daemon log errors",
-        control: window.dailies?.openLog && <Button onClick={() => void window.dailies?.openLog?.("daemon")}>Open log</Button>,
+        control: window.slate?.openLog && <Button onClick={() => void window.slate?.openLog?.("daemon")}>Open log</Button>,
       });
 
       add({
@@ -884,7 +894,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         title: "Cache folder",
         description: <span className="[overflow-wrap:anywhere]">{s.cache.dir}</span>,
         keywords: "path folder location",
-        control: window.dailies?.openFolder && <Button onClick={() => void window.dailies?.openFolder?.(s.cache.dir)}>Open</Button>,
+        control: window.slate?.openFolder && <Button onClick={() => void window.slate?.openFolder?.(s.cache.dir)}>Open</Button>,
       });
     }
 
@@ -902,11 +912,11 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
             : `Follows GitHub main.${updates.lastCheck ? ` Checked ${ago(updates.lastCheck)}.` : ""}`,
         keywords: "version upgrade release check",
         control: ready ? (
-          <Button variant="primary" onClick={() => void window.dailies?.applyUpdate()}>
+          <Button variant="primary" onClick={() => void window.slate?.applyUpdate()}>
             Restart
           </Button>
         ) : (
-          <Button disabled={updates.checking} onClick={() => void window.dailies?.checkUpdates?.()}>
+          <Button disabled={updates.checking} onClick={() => void window.slate?.checkUpdates?.()}>
             {updates.checking ? "Checking" : "Check now"}
           </Button>
         ),
@@ -929,7 +939,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
           title: "Roll back",
           description: `Go back to ${previous.short}: ${previous.subject}`,
           keywords: "revert previous version downgrade",
-          control: <Button onClick={() => void window.dailies?.rollback?.()}>Roll back</Button>,
+          control: <Button onClick={() => void window.slate?.rollback?.()}>Roll back</Button>,
         });
       add({
         id: "updateLog",
@@ -938,9 +948,9 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         title: "Update log",
         description: "Every fetch, build and restart.",
         keywords: "log",
-        control: <Button onClick={() => void window.dailies?.openLog?.("updates")}>Open log</Button>,
+        control: <Button onClick={() => void window.slate?.openLog?.("updates")}>Open log</Button>,
       });
-    } else if (window.dailies) {
+    } else if (window.slate) {
       add({
         id: "devBuild",
         page: "about",
@@ -958,7 +968,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         title: "Data folder",
         description: <span className="[overflow-wrap:anywhere]">{snap.appDir}</span>,
         keywords: "path registry preferences",
-        control: <Button onClick={() => void window.dailies?.openFolder?.(snap.appDir)}>Open</Button>,
+        control: <Button onClick={() => void window.slate?.openFolder?.(snap.appDir)}>Open</Button>,
       });
     return list;
   }, [p, snap, s, updates, agentsSetup, freed, freeing]);
@@ -1064,7 +1074,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
             <span className="text-faint">/</span>
             <span className="truncate font-semibold">{hits ? `Results for “${q.trim()}”` : TITLES[page]}</span>
           </D.Title>
-          <D.Description className="sr-only">Preferences for Dailies, its render service and updates.</D.Description>
+          <D.Description className="sr-only">Preferences for Slate, its render service and updates.</D.Description>
           {changed && (
             <Button variant="ghost" size="sm" onClick={restore}>
               <RotateCcw className="size-3.5" />
@@ -1300,8 +1310,8 @@ function Row({ e }: { e: Entry }) {
 function About({ version }: { version?: string }) {
   const [u, setU] = useState<UpdateState>();
   useEffect(() => {
-    void window.dailies?.updateState?.().then(setU);
-    return window.dailies?.onUpdate?.(setU);
+    void window.slate?.updateState?.().then(setU);
+    return window.slate?.onUpdate?.(setU);
   }, []);
   const r = u?.running;
   return (
@@ -1309,7 +1319,7 @@ function About({ version }: { version?: string }) {
       <Mark size={40} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2.5">
-          <span className="text-[18px] font-semibold">Dailies</span>
+          <span className="text-[18px] font-semibold">Slate</span>
           <span className="text-dim">
             {version ?? "0.1.0"}
             {r && <span className="font-mono text-[12.5px]">, {r.short}</span>}
@@ -1332,7 +1342,7 @@ export function SettingsHost() {
       }
     };
     window.addEventListener("keydown", onKey);
-    const off = window.dailies?.onOpenSettings?.((p) => openSettings(p));
+    const off = window.slate?.onOpenSettings?.((p) => openSettings(p));
     return () => {
       window.removeEventListener("keydown", onKey);
       off?.();

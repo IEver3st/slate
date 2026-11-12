@@ -6,8 +6,8 @@ import { absoluteWindow, canonical, contextAt, editedValue, findLayer, isLayerHi
 import { applyActions, findCli } from "./tsrct";
 import { emit } from "./events";
 import { owner } from "./settings";
-import { nowIso, describeChanges, type Cut } from "./cuts";
-import type { Annotation, Author, Note, NoteStatus, Revision, Suggestion } from "./types";
+import { nowIso, describeChanges, sendable, type Cut } from "./cuts";
+import { NOTE_TAGS, type Annotation, type Author, type Note, type NoteStatus, type NoteTag, type NoteTarget, type Revision, type Suggestion } from "./types";
 
 export const YOU: Author = { kind: "you", name: "You" };
 
@@ -34,13 +34,35 @@ export function anchorFor(doc: Doc, t: number) {
 
 export function displayTime(note: Note & { anchor?: { layerId: number; offset: number } }, doc: Doc | undefined): { t: number; moved: boolean; gone: boolean } {
   if (!note.anchor || !doc) return { t: note.t, moved: false, gone: false };
-  const layer = doc.composition.layers.find((l) => l.id === note.anchor!.layerId);
-  if (!layer) return { t: note.t, moved: false, gone: true };
-  const w = layerWindow(layer);
-  if (!Number.isFinite(w.start)) return { t: note.t, moved: false, gone: false };
+  if (!findLayer(doc, note.anchor.layerId)) return { t: note.t, moved: false, gone: true };
+  const w = absoluteWindow(doc, note.anchor.layerId);
+  if (!w || !Number.isFinite(w.start)) return { t: note.t, moved: false, gone: false };
   const t = Math.min(w.end - 1, w.start + note.anchor.offset);
   return { t, moved: Math.abs(t - note.t) > 20, gone: false };
 }
+
+function targetAnchor(doc: Doc, target: NoteTarget, t: number) {
+  const w = absoluteWindow(doc, target.layerId);
+  if (!w || !Number.isFinite(w.start)) return undefined;
+  return { layerId: target.layerId, name: target.name, offset: Math.round(t - w.start) };
+}
+
+export const TAG_TEXT: Record<NoteTag, string> = {
+  timing: "Timing is off here.",
+  text: "Fix this text.",
+  audio: "Fix the sound here.",
+  framing: "Fix the framing.",
+  remove: "Cut this.",
+};
+
+
+const cleanTag = (v: unknown) => (NOTE_TAGS.includes(v as NoteTag) ? (v as NoteTag) : undefined);
+const cleanTarget = (v: any): NoteTarget | undefined => {
+  if (!v || typeof v.layerId !== "number") return undefined;
+  const b = v.box;
+  const box = b && [b.x, b.y, b.w, b.h].every((x) => typeof x === "number" && x >= -0.01 && x <= 1.01) ? { x: b.x, y: b.y, w: b.w, h: b.h } : undefined;
+  return { layerId: v.layerId, name: String(v.name ?? v.layerId), box };
+};
 
 export function createNote(cut: Cut, input: {
   rev?: number;
@@ -53,11 +75,16 @@ export function createNote(cut: Cut, input: {
   frame?: Buffer;
   annotatedFrame?: Buffer;
   suggestion?: Suggestion;
+  tag?: unknown;
+  target?: unknown;
+  against?: unknown;
 }): Note {
   const rev = cut.revision(input.rev) ?? cut.latest;
   if (!rev) throw new Error("this cut has no revision yet");
   const doc = cut.docFor(rev.n)?.doc;
   const id = shortId();
+  const target = cleanTarget(input.target);
+  const against = Number(input.against);
   const note: Note & { anchor?: ReturnType<typeof anchorFor> } = {
     id,
     kind: "note",
@@ -72,8 +99,11 @@ export function createNote(cut: Cut, input: {
     annotations: input.annotations ?? [],
     context: doc ? contextAt(doc, input.t) : [],
     suggestion: input.suggestion,
+    tag: cleanTag(input.tag),
+    target,
+    against: Number.isInteger(against) && against !== rev.n && cut.revision(against) ? against : undefined,
     thread: [],
-    anchor: doc ? anchorFor(doc, input.t) : undefined,
+    anchor: doc ? (target && targetAnchor(doc, target, input.t)) || anchorFor(doc, input.t) : undefined,
   };
   if (input.frame) {
     note.frame = join(cut.dataDir, "frames", `${id}.png`);
@@ -91,13 +121,27 @@ export function createNote(cut: Cut, input: {
   return note;
 }
 
-export function updateNote(cut: Cut, id: string, patch: Partial<Pick<Note, "text" | "status" | "annotations" | "t" | "end">>, by: Author = YOU) {
-  const note = cut.notes.find((n) => n.id === id);
+export function updateNote(cut: Cut, id: string, patch: Partial<Pick<Note, "text" | "status" | "annotations" | "t" | "end">> & { tag?: unknown; target?: unknown; annotatedFrame?: Buffer | null }, by: Author = YOU) {
+  const note = cut.notes.find((n) => n.id === id) as (Note & { anchor?: ReturnType<typeof anchorFor> }) | undefined;
   if (!note) throw new Error(`no note ${id}`);
-  if (patch.text !== undefined) note.text = patch.text;
+  if (patch.text !== undefined) note.text = String(patch.text);
   if (patch.annotations !== undefined) note.annotations = patch.annotations;
   if (patch.t !== undefined) note.t = patch.t;
-  if (patch.end !== undefined) note.end = patch.end;
+  if (patch.end !== undefined) note.end = patch.end === null ? undefined : patch.end;
+  if (patch.tag !== undefined) note.tag = cleanTag(patch.tag);
+  if (patch.target !== undefined) {
+    note.target = cleanTarget(patch.target);
+    const doc = cut.docFor(note.rev)?.doc;
+    if (doc) note.anchor = (note.target && targetAnchor(doc, note.target, note.t)) || anchorFor(doc, note.t);
+  }
+  if (patch.annotatedFrame !== undefined) {
+    if (note.annotatedFrame) rmSync(note.annotatedFrame, { force: true });
+    note.annotatedFrame = undefined;
+    if (patch.annotatedFrame) {
+      note.annotatedFrame = join(cut.dataDir, "frames", `${id}-marked.png`);
+      writeFileSync(note.annotatedFrame, patch.annotatedFrame);
+    }
+  }
   if (by.kind === "you" && note.publishedAt && (patch.text !== undefined || patch.annotations !== undefined || patch.status)) note.humanAt = nowIso();
   if (patch.status && patch.status !== note.status) {
     note.status = patch.status;
@@ -145,8 +189,9 @@ export function clip(text: string, n = 90) {
 }
 
 export async function publish(cut: Cut) {
-  const drafts = cut.notes.filter((n) => n.status === "draft");
-  if (!drafts.length) return { published: 0, delivered: [] as string[] };
+  const drafts = cut.notes.filter(sendable);
+  const leftBehind = cut.notes.filter((n) => n.status === "draft").length - drafts.length;
+  if (!drafts.length) return { published: 0, leftBehind, delivered: [] as string[] };
   for (const n of drafts) {
     n.status = "open";
     n.publishedAt = nowIso();
@@ -156,8 +201,8 @@ export async function publish(cut: Cut) {
   cut.saveNotes();
   cut.log({ author: YOU, kind: "publish", rev: cut.latest?.n, text: `Sent ${drafts.length} note${drafts.length === 1 ? "" : "s"} on r${cut.latest?.n ?? "?"}` });
   emit({ type: "notes", cutId: cut.id });
-  const delivered = await deliver(cut, `${owner()} left ${drafts.length} new note${drafts.length === 1 ? "" : "s"} on "${cut.name}" (r${cut.latest?.n}) in Dailies.`);
-  return { published: drafts.length, delivered };
+  const delivered = await deliver(cut, `${owner()} left ${drafts.length} new note${drafts.length === 1 ? "" : "s"} on "${cut.name}" (r${cut.latest?.n}) in Slate.`);
+  return { published: drafts.length, leftBehind, delivered };
 }
 
 export async function approve(cut: Cut, revN: number) {
@@ -166,7 +211,7 @@ export async function approve(cut: Cut, revN: number) {
   cut.log({ author: YOU, kind: "approve", rev: revN, text: `Approved r${revN}` });
   emit({ type: "cuts" });
   emit({ type: "cut", cutId: cut.id });
-  await deliver(cut, `${owner()} approved r${revN} of "${cut.name}" in Dailies.`);
+  await deliver(cut, `${owner()} approved r${revN} of "${cut.name}" in Slate.`);
 }
 
 export type Collaborator = { thread: string; agent: string; at: string; link?: string };
@@ -192,14 +237,14 @@ async function sendToThread(thread: string, message: string) {
 export async function deliver(cut: Cut, headline: string): Promise<string[]> {
   const threads = cut.collaborators;
   if (!threads?.length) return [];
-  const message = `${headline} Call dailies_feedback with cut "${cut.path}" to read it, then address the open notes and call dailies_publish when the new revision is committed.`;
+  const message = `${headline} Call slate_feedback with cut "${cut.path}" to read it, then address the open notes and call slate_publish when the new revision is committed.`;
   const out: string[] = [];
   for (const c of threads.slice(-2)) {
     const r = await sendToThread(c.thread, message);
     if (r.code === 0) out.push(c.agent);
-    else console.error(`[dailies] could not reach thread ${c.thread}: ${r.stderr.trim()}`);
+    else console.error(`[slate] could not reach thread ${c.thread}: ${r.stderr.trim()}`);
   }
-  if (out.length) cut.log({ author: { kind: "unknown", name: "Dailies" }, kind: "status", text: `Delivered to ${out.join(", ")}` });
+  if (out.length) cut.log({ author: { kind: "unknown", name: "Slate" }, kind: "status", text: `Delivered to ${out.join(", ")}` });
   return out;
 }
 
@@ -278,7 +323,7 @@ function commitAsYou(cut: Cut, tmp: string, baseRev: Revision, summary: string, 
 async function writeActions(cut: Cut, actions: unknown[], baseRev: Revision, summary: string) {
   const cli = findCli();
   const dir = dirname(cut.path);
-  const tmp = join(dir, `.${basename(cut.path)}.dailies-${process.pid}-${Date.now()}.tsrct`);
+  const tmp = join(dir, `.${basename(cut.path)}.slate-${process.pid}-${Date.now()}.tsrct`);
   const actionsFile = join(cut.dataDir, `actions-${Date.now()}.json`);
   writeFileSync(actionsFile, JSON.stringify(actions));
   try {
@@ -315,7 +360,7 @@ async function unpinFonts(cut: Cut, cli: string, archive: string) {
     writeFileSync(checkout, JSON.stringify(doc));
     await tsrctRun(cli, ["project", "commit", "--project", archive, "--file", checkout, "--output", rewritten], "tsrct project commit failed");
     renameSync(rewritten, archive);
-    console.log(`[dailies] ${cut.name}: removed ${unpinned} font pin${unpinned === 1 ? "" : "s"} that tsrct project apply adds, so the cut still renders`);
+    console.log(`[slate] ${cut.name}: removed ${unpinned} font pin${unpinned === 1 ? "" : "s"} that tsrct project apply adds, so the cut still renders`);
   } finally {
     rmSync(checkout, { force: true });
     rmSync(rewritten, { force: true });
@@ -377,7 +422,7 @@ export async function edit(cut: Cut, requests: EditRequest[], opts: { force?: bo
   cut.saveNotes();
   cut.log({ author: YOU, kind: "edit", noteId: id, rev: base.n, text: queued ? `Queued for ${cut.agent?.name}: ${summary}` : `Edited: ${summary}` });
   emit({ type: "notes", cutId: cut.id, noteId: id });
-  if (queued) await deliver(cut, `${owner()} queued an edit on "${cut.name}" in Dailies: ${summary}.`);
+  if (queued) await deliver(cut, `${owner()} queued an edit on "${cut.name}" in Slate: ${summary}.`);
   else cut.scheduleIngest(0);
   return { note, queued };
 }
@@ -466,7 +511,7 @@ export async function revertTo(cut: Cut, revN: number) {
   const base = cut.latest!;
   if (!rev.snapshot || !existsSync(rev.snapshot)) throw new Error(`r${revN} is no longer kept on disk; only the last few revisions can be restored`);
   if (rev.hash === base.hash) throw new Error(`The cut already matches r${revN}; nothing to restore`);
-  const tmp = join(dirname(cut.path), `.${basename(cut.path)}.dailies-revert-${Date.now()}.tsrct`);
+  const tmp = join(dirname(cut.path), `.${basename(cut.path)}.slate-revert-${Date.now()}.tsrct`);
   try {
     await copyFile(rev.snapshot, tmp);
     commitAsYou(cut, tmp, base, `Reverted to r${revN}`, `the cut changed while r${revN} was being restored; nothing was overwritten`);
@@ -495,14 +540,17 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
       kind: n.kind,
       status: n.status,
       madeOnRevision: n.rev,
+      comparedWithRevision: n.against,
       time: fmtTime(d.t),
       timeMs: d.t,
-      endMs: n.end,
+      endMs: n.end !== undefined ? n.end + (d.t - n.t) : undefined,
       movedFromMs: d.moved ? n.t : undefined,
       anchorGone: d.gone || undefined,
-      text: n.text,
+      tag: n.tag,
+      text: n.text || (n.tag ? TAG_TEXT[n.tag] : ""),
+      target: n.target,
       author: n.author.name,
-      visibleLayers: n.context.filter((c) => !c.hidden).map((c) => ({ id: c.id, name: c.name, type: c.type, text: c.text, asset: c.asset, sourceMs: c.sourceMs })),
+      visibleLayers: n.context.filter((c) => !c.hidden).map((c) => ({ id: c.id, name: c.name, type: c.type, text: c.text, asset: c.asset, sourceMs: c.sourceMs, volume: c.volume })),
       drawings: n.annotations.length ? n.annotations : undefined,
       frame: n.frame,
       markedFrame: n.annotatedFrame,
@@ -523,7 +571,7 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
     size: latest ? `${latest.width}x${latest.height}` : undefined,
     notes,
     guidance: notes.length
-      ? "Address each note. Edits marked appliedToCut are already in the project: fold them into your generator or source so your next build keeps them. Reply with dailies_reply (status claimed/addressed/wontfix) and call dailies_publish with addresses=[note ids] after committing."
+      ? "Address each note. A note with only a tag carries the tag sentence as its text. target names the layer the note is about. comparedWithRevision means the reviewer was comparing against that revision when writing it, so check what differs there. Edits marked appliedToCut are already in the project: fold them into your generator or source so your next build keeps them. Reply with slate_reply (status claimed/addressed/wontfix) and call slate_publish with addresses=[note ids] after committing."
       : "No open feedback.",
   };
 }

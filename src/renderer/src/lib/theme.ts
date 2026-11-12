@@ -34,7 +34,7 @@ function apply() {
 
 export function installTheme() {
   const style = document.createElement("style");
-  style.id = "dailies-themes";
+  style.id = "slate-themes";
   style.textContent = themeCss();
   document.head.appendChild(style);
   apply();

@@ -1,5 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { CutDetail, Note, TrackItem } from "@/lib/api";
+import type { Checks, CutDetail, Finding, Note, PairDiff, Peaks, TrackItem } from "@/lib/api";
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu";
+import { tagOf } from "@/lib/tags";
 import { mediaUrl } from "@/lib/api";
 import { usePlayerSelect, type PlayerController } from "@/lib/player";
 import { cn, tc } from "@/lib/format";
@@ -50,6 +52,10 @@ export function Filmstrip({
   selectedLayer,
   onSelectLayer,
   onRetime,
+  diff,
+  checks,
+  peaks,
+  onNoteFinding,
 }: {
   cut: CutDetail;
   controller: PlayerController;
@@ -59,12 +65,18 @@ export function Filmstrip({
   selectedLayer?: number;
   onSelectLayer: (id: number | undefined) => void;
   onRetime: (item: TrackItem, start: number, end: number) => void;
+  diff?: PairDiff;
+  checks?: Checks;
+  peaks?: Peaks;
+  onNoteFinding: (f: Finding) => void;
 }) {
   const loop = usePlayerSelect(controller, (s) => s.loop);
   const rev = cut.revisions.find((r) => r.n === cut.rev);
   const duration = rev?.durationMs ?? cut.latest?.durationMs ?? 1;
   const seconds = cut.segments.length || Math.ceil(duration / 1000);
-  const changed = new Set(cut.changedSegments.length === seconds && cut.rev === cut.revisions[0]?.n ? [] : cut.changedSegments);
+  const changed = new Set(diff ? diff.seconds.filter((x) => x.picture === "changed" || x.sound === "changed" || x.picture === "only").map((x) => x.s) : cut.changedSegments.length === seconds && cut.rev === cut.revisions[0]?.n ? [] : cut.changedSegments);
+  const maybe = new Set(diff ? diff.seconds.filter((x) => !changed.has(x.s) && (x.picture === "maybe" || x.sound === "maybe")).map((x) => x.s) : []);
+  const soundOnly = new Set(diff ? diff.seconds.filter((x) => x.sound === "changed" && x.picture === "same").map((x) => x.s) : []);
   const stale = new Set(cut.movie && cut.movie.rev === cut.rev ? cut.movie.stale : []);
   const lanes = useMemo(() => laneLayout(cut.timeline), [cut.timeline]);
   const area = useRef<HTMLDivElement>(null);
@@ -158,8 +170,41 @@ export function Filmstrip({
     if (st === "failed") return "bg-red/70";
     if (st === "missing") return "bg-transparent";
     if (stale.has(s)) return "bg-faint/50";
-    return changed.has(s) ? "bg-amber" : "bg-line";
+    return changed.has(s) ? "bg-amber" : maybe.has(s) ? "bg-amber/40" : "bg-line";
   };
+
+  const rule = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const x0 = e.clientX;
+    const t0 = msAt(x0);
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientX - x0) < 5) return;
+      moved = true;
+      const t = msAt(ev.clientX);
+      controller.setLoop({ in: Math.min(t0, t), out: Math.max(t0, t) });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (!moved) {
+        controller.pause();
+        controller.seek(t0);
+      } else {
+        const l = controller.state.loop;
+        if (l) controller.seek(l.in);
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const timed = checks?.findings.filter((f) => f.atMs !== undefined) ?? [];
+  const general = checks?.findings.filter((f) => f.atMs === undefined) ?? [];
+  const showChecks = !!checks && (checks.lint !== "missing" || checks.findings.length > 0);
+  const hasPeaks = !!peaks?.seconds.some(Boolean);
 
   const version = `${cut.rev}-${cut.movie?.key ?? ""}`;
   const labelW = 84;
@@ -167,7 +212,7 @@ export function Filmstrip({
   return (
     <div className="relative grid shrink-0 touch-none select-none bg-well pt-2 pb-3" style={{ gridTemplateColumns: `${labelW}px 1fr 20px` }} onPointerDown={(e) => scrub(e)}>
       <div />
-      <div className="relative h-[22px] cursor-ew-resize">
+      <div className="relative h-[22px] cursor-text" onPointerDown={rule} title="Click to jump, drag to mark a range">
         {Array.from({ length: seconds }, (_, s) => (
           <span key={s} className={cn("absolute top-0.5 text-[12px] font-semibold", changed.has(s) ? "text-amber" : "text-faint")} style={{ left: `calc(${pct(s * 1000)} + 4px)` }}>
             {String(s).padStart(2, "0")}
@@ -189,7 +234,8 @@ export function Filmstrip({
         {Array.from({ length: seconds }, (_, s) => (
           <div key={s} className={cn("relative overflow-hidden rounded-[3px] bg-panel", landed.has(s) && "landed")}>
             <Thumb cutId={cut.id} s={s} rev={cut.rev} ready={cut.segments[s] === "ready"} version={version} />
-            {changed.has(s) && <div className="pointer-events-none absolute inset-0 z-[1] rounded-[3px] shadow-[inset_0_0_0_2px_var(--color-amber)]" />}
+            {changed.has(s) && <div className={cn("pointer-events-none absolute inset-0 z-[1] rounded-[3px]", soundOnly.has(s) ? "shadow-[inset_0_-3px_0_var(--color-teal)]" : "shadow-[inset_0_0_0_2px_var(--color-amber)]")} />}
+            {maybe.has(s) && <div className="pointer-events-none absolute inset-0 z-[1] rounded-[3px] shadow-[inset_0_0_0_2px_color-mix(in_srgb,var(--color-amber)_45%,transparent)]" style={{ backgroundImage: "repeating-linear-gradient(135deg, transparent 0 6px, color-mix(in srgb, var(--color-amber) 22%, transparent) 6px 8px)" }} />}
           </div>
         ))}
         {loop && <div className="pointer-events-none absolute inset-y-0 bg-amber/10 shadow-[inset_2px_0_0_var(--color-amber),inset_-2px_0_0_var(--color-amber)]" style={{ left: pct(loop.in), width: pct(loop.out - loop.in) }} />}
@@ -197,6 +243,59 @@ export function Filmstrip({
       <div />
 
       <div className="col-span-3 mt-2 grid" style={{ gridTemplateColumns: `${labelW}px 1fr 20px` }}>
+        {showChecks && (
+          <div className="contents">
+            <div className="flex items-start pt-[1px] pl-5 text-[12px] text-dim">
+              {general.length ? (
+                <Menu>
+                  <MenuTrigger asChild>
+                    <button className="text-left hover:text-text" onPointerDown={(e) => e.stopPropagation()}>
+                      Checks <span className="text-amber">+{general.length}</span>
+                    </button>
+                  </MenuTrigger>
+                  <MenuContent>
+                    {general.map((g, i) => (
+                      <MenuItem key={i} onSelect={() => onNoteFinding(g)}>
+                        <FindingLine f={g} />
+                      </MenuItem>
+                    ))}
+                  </MenuContent>
+                </Menu>
+              ) : (
+                <span title={checks!.lint === "running" ? "Checking this revision" : checks!.lint === "missing" ? "cutlint is not installed, only the sound is checked" : undefined}>Checks</span>
+              )}
+            </div>
+            <div className="relative mb-[3px] h-4">
+              {checks!.lint === "running" && timed.length === 0 && <span className="absolute top-0 left-0 text-[11px] leading-4 text-faint">Checking</span>}
+              {checks!.lint !== "running" && timed.length === 0 && <span className="absolute top-0 left-0 text-[11px] leading-4 text-faint">Nothing flagged</span>}
+              {timed.map((fd, i) => (
+                <Menu key={i}>
+                  <MenuTrigger asChild>
+                    <button
+                      onPointerDown={(e) => e.stopPropagation()}
+                      title={fd.message}
+                      aria-label={fd.message}
+                      className={cn(
+                        "absolute top-0.5 size-3 -translate-x-1/2 rotate-45 rounded-[2px]",
+                        fd.level === "error" ? "bg-red" : fd.level === "warning" ? "bg-amber" : "bg-faint",
+                      )}
+                      style={{ left: pct(fd.atMs!) }}
+                    />
+                  </MenuTrigger>
+                  <MenuContent>
+                    <div className="max-w-[320px] px-2.5 pt-2 pb-1.5">
+                      <FindingLine f={fd} />
+                    </div>
+                    <MenuSeparator />
+                    <MenuItem onSelect={() => (controller.pause(), controller.seek(fd.atMs!))}>Go to {tc(fd.atMs!)}</MenuItem>
+                    <MenuItem onSelect={() => onNoteFinding(fd)}>Note this</MenuItem>
+                  </MenuContent>
+                </Menu>
+              ))}
+            </div>
+            <div />
+          </div>
+        )}
         {lanes.map((lane) => (
           <div key={lane.key} className="contents">
             <div className="flex items-start pt-[3px] pl-5 text-[12px] text-dim">{lane.label}</div>
@@ -238,9 +337,21 @@ export function Filmstrip({
             <div />
           </div>
         ))}
+        {hasPeaks && (
+          <div className="contents">
+            <div className="flex items-start pl-5 text-[12px] text-dim">Mix</div>
+            <Waveform peaks={peaks!} duration={duration} width={areaW} />
+            <div />
+          </div>
+        )}
       </div>
 
       <div className="pointer-events-none absolute inset-y-1.5" style={{ left: labelW, right: 20 }}>
+        {cues
+          .filter((n) => n.end !== undefined && n.end > n.t)
+          .map((n) => (
+            <div key={`r${n.id}`} className="absolute top-[38px] h-[6px] rounded-full bg-amber/45" style={{ left: pct(n.displayT), width: pct(n.end! - n.t) }} />
+          ))}
         <Playhead controller={controller} duration={duration} scrubbing={scrubbing} />
         {cues.map((n, i) => (
           <button
@@ -253,8 +364,10 @@ export function Filmstrip({
               selectedNote === n.id && "ring-2 ring-playhead",
             )}
             style={{ left: pct(n.displayT) }}
+            title={n.text || tagOf(n.tag)?.sentence || "Marker, not written yet"}
           >
             {i + 1}
+            {n.tag && <i className={cn("absolute -right-0.5 -bottom-0.5 size-[7px] rounded-full ring-2 ring-well", tagOf(n.tag)?.dot)} />}
           </button>
         ))}
       </div>
@@ -273,4 +386,42 @@ function Playhead({ controller, duration, scrubbing }: { controller: PlayerContr
       )}
     </div>
   );
+}
+
+function FindingLine({ f }: { f: Finding }) {
+  return (
+    <span className="grid gap-0.5 text-[12.5px]">
+      <span className={cn("font-semibold", f.level === "error" ? "text-red" : f.level === "warning" ? "text-amber" : "text-dim")}>
+        {f.rule}
+        {f.level === "allowed" && <span className="font-normal text-dim">, allowed by the agent</span>}
+      </span>
+      <span className="text-soft">{f.message}</span>
+    </span>
+  );
+}
+
+function Waveform({ peaks, duration, width }: { peaks: Peaks; duration: number; width: number }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    const h = 18;
+    c.width = Math.max(1, Math.round(width * dpr));
+    c.height = Math.round(h * dpr);
+    const ctx = c.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, h);
+    ctx.fillStyle = getComputedStyle(c).color;
+    const perSec = (1000 / duration) * width;
+    peaks.seconds.forEach((bins, s) => {
+      if (!bins) return;
+      const bw = perSec / bins.length;
+      bins.forEach((v, i) => {
+        const amp = (v / 255) * (h - 2);
+        ctx.fillRect(s * perSec + i * bw, (h - amp) / 2, Math.max(1, bw - 0.6), Math.max(1, amp));
+      });
+    });
+  }, [peaks, duration, width]);
+  return <canvas ref={ref} aria-hidden className="mb-[3px] h-[18px] w-full text-teal/70" />;
 }

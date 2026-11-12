@@ -5,7 +5,7 @@ import { gzipSync, gunzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { listZip, readZipEntry } from "./zip";
 import { analyze, diffDocs, hash, type Analysis, type AssetTable, type Doc, canonical, editedValue, findLayer } from "./doc";
-import { cutDataDir, cutIdFor, normPath, readJson, writeJsonAtomic, REGISTRY_FILE } from "./paths";
+import { cutDataDir, cutIdFor, legacyCutDataDir, normPath, readJson, relocated, writeJsonAtomic, REGISTRY_FILE } from "./paths";
 import { emit } from "./events";
 import { owner } from "./settings";
 import type { Activity, Author, CutSummary, Note, Revision } from "./types";
@@ -100,6 +100,10 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+export const sendable = (n: Note) => n.status === "draft" && (n.kind !== "note" || !!(n.text.trim() || n.tag || n.target || n.annotations.length));
+
+const UNSEEN_WINDOW_MS = 7 * 24 * 3600_000;
+
 export class Cut {
   readonly id: string;
   readonly path: string;
@@ -111,6 +115,7 @@ export class Cut {
   activity: Activity[] = [];
   agent?: { name: string; state: string; text: string; at: string };
   approvedRev?: number;
+  seenRev?: number;
   collaborators: { thread: string; agent: string; at: string; link?: string }[] = [];
   pendingSelf?: { until: number; summary: string; size: number; mtimeMs: number };
   lastAgentTouch?: { name: string; at: number; summary?: string; addresses?: string[]; publishing?: boolean };
@@ -135,7 +140,7 @@ export class Cut {
     this.dataDir = cutDataDir(this.path);
     mkdirSync(join(this.dataDir, "docs"), { recursive: true });
     mkdirSync(join(this.dataDir, "frames"), { recursive: true });
-    const state = readJson<{ revisions: Revision[]; approvedRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"]; storage?: Storage; inPlaceWriter?: boolean }>(join(this.dataDir, "revisions.json"), { revisions: [] });
+    const state = readJson<{ revisions: Revision[]; approvedRev?: number; seenRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"]; storage?: Storage; inPlaceWriter?: boolean }>(join(this.dataDir, "revisions.json"), { revisions: [] });
     this.revisions = state.revisions ?? [];
     this.storage = state.storage;
     this.inPlaceWriter = !!state.inPlaceWriter;
@@ -143,9 +148,27 @@ export class Cut {
     this.agent = state.agent;
     this.collaborators = state.collaborators ?? [];
     this.notes = readJson<{ notes: Note[] }>(join(this.dataDir, "notes.json"), { notes: [] }).notes ?? [];
+    this.seenRev = state.seenRev ?? this.seenFromHistory();
+    this.relocateFrom(legacyCutDataDir(this.path));
     this.activity = this.loadActivity();
     this.rekey();
     this.sweepSnapshotDir();
+  }
+
+  private relocateFrom(old: string) {
+    let revisions = false;
+    let notes = false;
+    for (const r of this.revisions) {
+      const snapshot = relocated(r.snapshot, old, this.dataDir);
+      if (snapshot !== r.snapshot) (r.snapshot = snapshot), (revisions = true);
+    }
+    for (const n of this.notes) {
+      const frame = relocated(n.frame, old, this.dataDir);
+      const annotatedFrame = relocated(n.annotatedFrame, old, this.dataDir);
+      if (frame !== n.frame || annotatedFrame !== n.annotatedFrame) (n.frame = frame), (n.annotatedFrame = annotatedFrame), (notes = true);
+    }
+    if (revisions) this.saveState();
+    if (notes) this.saveNotes();
   }
 
   private snapshotFiles() {
@@ -166,6 +189,7 @@ export class Cut {
       if (!line) continue;
       try {
         const a = JSON.parse(line) as Activity;
+        if (a.author?.kind === "unknown" && a.author.name === "Dailies") a.author.name = "Slate";
         byId.set(a.id, a);
       } catch {}
     }
@@ -195,6 +219,21 @@ export class Cut {
     if (changed) this.saveState();
   }
 
+  private seenFromHistory() {
+    const latest = this.latest;
+    if (!latest) return undefined;
+    if (Date.now() - Date.parse(latest.at) > UNSEEN_WINDOW_MS) return latest.n;
+    const yours = [this.approvedRev ?? 0, ...this.notes.filter((n) => n.author.kind === "you").map((n) => n.rev), ...this.revisions.filter((r) => r.author.kind === "you").map((r) => r.n)];
+    return Math.max(...yours) || undefined;
+  }
+
+  markSeen(n: number) {
+    if (!this.revision(n) || (this.seenRev ?? 0) >= n) return false;
+    this.seenRev = n;
+    this.saveState();
+    return true;
+  }
+
   get latest(): Revision | undefined {
     return this.revisions[this.revisions.length - 1];
   }
@@ -205,7 +244,7 @@ export class Cut {
   }
 
   saveState() {
-    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, approvedRev: this.approvedRev, agent: this.agent, collaborators: this.collaborators, storage: this.storage, inPlaceWriter: this.inPlaceWriter || undefined });
+    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, approvedRev: this.approvedRev, seenRev: this.seenRev, agent: this.agent, collaborators: this.collaborators, storage: this.storage, inPlaceWriter: this.inPlaceWriter || undefined });
   }
 
   saveNotes() {
@@ -264,13 +303,13 @@ export class Cut {
         this.scheduleIngest(400);
       });
       watcher.on("error", (e) => {
-        console.error(`[dailies] stopped watching ${dir}: ${e}; polling instead`);
+        console.error(`[slate] stopped watching ${dir}: ${e}; polling instead`);
         watcher.close();
         if (this.watcher === watcher) this.watcher = undefined;
       });
       this.watcher = watcher;
     } catch (e) {
-      console.error(`[dailies] cannot watch ${dir}: ${e}`);
+      console.error(`[slate] cannot watch ${dir}: ${e}`);
     }
   }
 
@@ -294,7 +333,7 @@ export class Cut {
     const attempts = this.retry?.stamp === stamp ? this.retry.attempts : 0;
     if (attempts && now < this.retry!.nextAt) return;
     this.retry = { stamp, attempts: attempts + 1, nextAt: now + Math.min(300_000, 10_000 * 2 ** attempts) };
-    console.log(`[dailies] ${this.name} on disk is newer than r${this.latest.n} and was not ingested; ingesting (attempt ${attempts + 1})`);
+    console.log(`[slate] ${this.name} on disk is newer than r${this.latest.n} and was not ingested; ingesting (attempt ${attempts + 1})`);
     this.scheduleIngest(0);
   }
 
@@ -325,7 +364,7 @@ export class Cut {
 
   ingestQuietly(): Promise<Revision | undefined> {
     return this.ingest().catch((e) => {
-      console.error(`[dailies] could not ingest ${this.name}: ${e instanceof Error ? e.message : e}`);
+      console.error(`[slate] could not ingest ${this.name}: ${e instanceof Error ? e.message : e}`);
       emit({ type: "cut", cutId: this.id });
       return undefined;
     });
@@ -357,7 +396,7 @@ export class Cut {
       if (prev && prev.size === cur.size && prev.mtimeMs === cur.mtimeMs) return { stat: cur, stable: true };
       if (prev && !announced && Date.now() - started > 10_000) {
         announced = true;
-        console.log(`[dailies] ${this.name} is still being written (${gb(cur.size)} so far); waiting for it to settle`);
+        console.log(`[slate] ${this.name} is still being written (${gb(cur.size)} so far); waiting for it to settle`);
       }
       prev = cur;
       await sleep(250);
@@ -371,7 +410,7 @@ export class Cut {
       emit({ type: "cut", cutId: this.id });
       return;
     }
-    if (!stable) console.error(`[dailies] ${this.name} kept changing for ${STABLE_WAIT_MS / 1000} s; reading it anyway`);
+    if (!stable) console.error(`[slate] ${this.name} kept changing for ${STABLE_WAIT_MS / 1000} s; reading it anyway`);
     const movedSince = () => {
       const now = this.stamp();
       return { gone: !now, moved: !now || now.mtimeMs !== stat.mtimeMs || now.size !== stat.size };
@@ -393,7 +432,7 @@ export class Cut {
         this.ingestAgain = true;
         return;
       }
-      console.error(`[dailies] cannot read ${this.path}: ${lastErr}`);
+      console.error(`[slate] cannot read ${this.path}: ${lastErr}`);
       return;
     }
     if (read.moved) {
@@ -416,7 +455,7 @@ export class Cut {
     const id = fileId(this.path);
     if (this.inPlaceWriter && !inPlace && id && prev?.fileId && prev.fileId !== id) {
       this.inPlaceWriter = false;
-      console.log(`[dailies] ${this.name} is saved by replacing the file again; snapshots are hardlinks again`);
+      console.log(`[slate] ${this.name} is saved by replacing the file again; snapshots are hardlinks again`);
     }
     const incoming = await this.freeze(stat, inPlace || this.inPlaceWriter);
     const torn = !!incoming && (fileId(this.path) !== id || fileSize(incoming) !== stat.size);
@@ -431,7 +470,7 @@ export class Cut {
       } catch {}
       prev.snapshot = undefined;
       this.inPlaceWriter = true;
-      console.error(`[dailies] ${this.name} was rewritten in place; r${prev.n} can no longer be restored and future snapshots are copies`);
+      console.error(`[slate] ${this.name} was rewritten in place; r${prev.n} can no longer be restored and future snapshots are copies`);
       this.onSourceLost?.(this, prev.n);
     }
     const author = this.attribute(stat);
@@ -605,7 +644,7 @@ export class Cut {
   private setStorage(next: Storage) {
     const changed = this.storage?.mode !== next.mode || this.storage?.reason !== next.reason;
     this.storage = next;
-    if (changed && next.reason) console.error(`[dailies] ${this.name}: ${next.reason}`);
+    if (changed && next.reason) console.error(`[slate] ${this.name}: ${next.reason}`);
   }
 
   private async freeze(stat: { size: number }, copy: boolean): Promise<string | undefined> {
@@ -622,20 +661,20 @@ export class Cut {
         linkError = e;
       }
     }
-    const why = copy ? "This cut is saved in place, so Dailies has to copy each save" : `This drive can't hardlink the cut (${linkError instanceof Error ? linkError.message : linkError}), so Dailies has to copy each save`;
+    const why = copy ? "This cut is saved in place, so Slate has to copy each save" : `This drive can't hardlink the cut (${linkError instanceof Error ? linkError.message : linkError}), so Slate has to copy each save`;
     if (stat.size > COPY_LIMIT) {
-      this.setStorage({ mode: "none", reason: `${why}, and at ${gb(stat.size)} it is over the ${gb(COPY_LIMIT)} copy limit. Dailies can't keep restore points for it, and saving during a render restarts that render.` });
+      this.setStorage({ mode: "none", reason: `${why}, and at ${gb(stat.size)} it is over the ${gb(COPY_LIMIT)} copy limit. Slate can't keep restore points for it, and saving during a render restarts that render.` });
       return undefined;
     }
     try {
       const started = Date.now();
       await copyFile(this.path, target);
-      if (Date.now() - started > 2000) console.log(`[dailies] copied ${gb(stat.size)} of ${this.name} for its snapshot in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      if (Date.now() - started > 2000) console.log(`[slate] copied ${gb(stat.size)} of ${this.name} for its snapshot in ${((Date.now() - started) / 1000).toFixed(1)} s`);
       this.setStorage({ mode: "copied" });
       return target;
     } catch (e) {
       rmSync(target, { force: true });
-      this.setStorage({ mode: "none", reason: `${why}, and the copy failed (${e instanceof Error ? e.message : e}). Dailies can't keep restore points for it right now.` });
+      this.setStorage({ mode: "none", reason: `${why}, and the copy failed (${e instanceof Error ? e.message : e}). Slate can't keep restore points for it right now.` });
       return undefined;
     }
   }
@@ -791,9 +830,10 @@ export class Cut {
       latest: l ? { n: l.n, hash: l.hash.slice(0, 10), at: l.at, author: l.author, durationMs: l.durationMs, width: l.width, height: l.height, summary: l.summary ?? describeChanges(l), changed: l.changedSegments, segments: l.vkeys.length } : undefined,
       recent: this.revisions.slice(-6).map((r) => ({ n: r.n, at: r.at, author: r.author })),
       openNotes: this.notes.filter((n) => n.status === "open" || n.status === "claimed").length,
-      draftNotes: this.notes.filter((n) => n.status === "draft").length,
+      draftNotes: this.notes.filter(sendable).length,
       agent: this.agent,
       approvedRev: this.approvedRev,
+      seenRev: this.seenRev,
       render,
       poster,
       missing: !existsSync(this.path),

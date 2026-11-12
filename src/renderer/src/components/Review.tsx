@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight, Pause, Play, Repeat, Smartphone, Columns2, Maximize, FolderOpen, ExternalLink, Settings as Gear } from "lucide-react";
-import type { Annotation, CutDetail, TrackItem } from "@/lib/api";
+import type { Annotation, ContextLayer, CutDetail, Finding, Note, NoteTag, NoteTarget, TrackItem } from "@/lib/api";
+import { useChecks, useDiff, usePeaks } from "@/lib/review-data";
+import { TAGS, unwritten } from "@/lib/tags";
+import { ChangeList, FixCheck, LayerPicker } from "./ReviewTools";
 import { api, mediaUrl, onEvent } from "@/lib/api";
 import { useCut } from "@/lib/store";
 import { PlayerController, usePlayerSelect } from "@/lib/player";
@@ -52,7 +55,7 @@ function Presence({ cut, room, inline }: { cut: CutDetail; room?: number; inline
   const collaborator = cut.collaborators.at(-1);
   const fresh = a && Date.now() - Date.parse(a.at) < 30 * 60_000;
   const dot = a && (
-    <span className={cn("size-2 shrink-0 rounded-full", a.state === "working" && fresh ? "animate-pulse bg-teal" : a.state === "blocked" ? "bg-red" : a.state === "ready" ? "bg-amber" : "bg-faint")} />
+    <span className={cn("size-2 shrink-0 rounded-full", a.state === "working" && fresh ? "motion-safe:animate-pulse bg-teal" : a.state === "blocked" ? "bg-red" : a.state === "ready" ? "bg-amber" : "bg-faint")} />
   );
   const status =
     a && (a.state === "working" ? a.text || "Working on this cut" : a.state === "ready" ? a.text || `r${latest?.n} is ready` : a.state === "blocked" ? `Needs you: ${a.text}` : a.text || "Idle");
@@ -82,7 +85,7 @@ function Presence({ cut, room, inline }: { cut: CutDetail; room?: number; inline
               {a.name}
             </span>
             {collaborator?.link && (
-              <button className="pointer-events-auto flex h-[1lh] shrink-0 items-center text-dim hover:text-text" aria-label="Open the agent's thread" onClick={() => void window.dailies?.openExternal(collaborator.link!)}>
+              <button className="pointer-events-auto flex h-[1lh] shrink-0 items-center text-dim hover:text-text" aria-label="Open the agent's thread" onClick={() => void window.slate?.openExternal(collaborator.link!)}>
                 <ExternalLink className="size-3.5" />
               </button>
             )}
@@ -161,6 +164,12 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
   const [selectedNote, setSelectedNote] = useState<string>();
   const [selectedLayer, setSelectedLayer] = useState<number>();
   const [tab, setTab] = useState(() => start?.tab ?? new URL(location.href).searchParams.get("tab") ?? "cues");
+  const [flip, setFlip] = useState(false);
+  const hearCompare = usePlayerSelect(controller, (s) => s.hearCompare);
+  const [rangeOff, setRangeOff] = useState<string>();
+  const [target, setTarget] = useState<NoteTarget & { measuring?: boolean }>();
+  const [picker, setPicker] = useState<{ x: number; y: number; t: number; layers?: ContextLayer[] }>();
+  const [fix, setFix] = useState<{ ids: string[]; i: number; resolved: number; reopened: number; skipped: number; replying: boolean }>();
   const composer = useRef<ComposerHandle>(null);
   const stage = useRef<HTMLDivElement>(null);
   const { toasts, push } = useToasts();
@@ -176,6 +185,10 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     safeApplied.current = true;
     setSafe(safeDefault === "always" || (safeDefault === "portrait" && portrait));
   }, [portrait, safeDefault]);
+  const watching = cut ? (cut.rev ?? cut.revisions.at(-1)?.n) : undefined;
+  useEffect(() => {
+    if (watching) void api(`/api/cuts/${cutId}/seen`, { body: { rev: watching } }).catch(() => {});
+  }, [cutId, watching]);
   useEffect(() => {
     if (!src || autoplayed.current) return;
     autoplayed.current = true;
@@ -188,7 +201,7 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
         if (e.state === "done" && typeof e.file === "string") {
           const file = e.file;
           const size = typeof e.bytes === "number" ? `, ${megabytes(e.bytes)}` : "";
-          push(`Exported r${e.rev} in 4K60${size}`, undefined, window.dailies ? { label: "Show in Explorer", run: () => void window.dailies?.reveal(file) } : undefined);
+          push(`Exported r${e.rev} in 4K60${size}`, undefined, window.slate ? { label: "Show in Explorer", run: () => void window.slate?.reveal(file) } : undefined);
         } else if (e.state === "failed") push(`Export of r${e.rev} failed: ${String(e.error ?? "unknown error")}`, "error");
       else if (e.state === "cancelled") push(`Cancelled the r${e.rev} export`);
     });
@@ -254,17 +267,215 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     [cut, push],
   );
 
-  const captureMarked = useCallback(() => {
-    const v = controller.video;
-    if (!v || !v.videoWidth) return undefined;
-    const c = document.createElement("canvas");
-    c.width = v.videoWidth;
-    c.height = v.videoHeight;
-    const ctx = c.getContext("2d")!;
-    ctx.drawImage(v, 0, 0);
-    drawAnnotations(ctx, pending, c.width, c.height);
-    return c.toDataURL("image/png");
-  }, [controller, pending]);
+  const captureMarked = useCallback(
+    (extra: Annotation[] = []) => {
+      const v = controller.video;
+      if (!v || !v.videoWidth) return undefined;
+      const c = document.createElement("canvas");
+      c.width = v.videoWidth;
+      c.height = v.videoHeight;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(v, 0, 0);
+      drawAnnotations(ctx, [...extra, ...pending, ...(target?.box ? [{ kind: "rect" as const, ...target.box }] : [])], c.width, c.height);
+      return c.toDataURL("image/png");
+    },
+    [controller, pending, target],
+  );
+
+  const viewingRev = cut ? (cut.rev ?? cut.revisions.at(-1)?.n) : undefined;
+  const diff = useDiff(cutId, compare ? viewingRev : undefined, compare?.rev);
+  const checks = useChecks(cutId, viewingRev);
+  const peaks = usePeaks(cutId, viewingRev);
+
+  useEffect(() => {
+    if (compare && compare.rev === viewingRev) setCompare(undefined);
+  }, [compare?.rev, viewingRev]);
+  useEffect(() => {
+    if (!compare) {
+      setFlip(false);
+      controller.setHearCompare(false);
+    }
+  }, [!!compare, controller]);
+  useEffect(() => {
+    const release = () => setFlip(false);
+    const up = (e: KeyboardEvent) => e.key.toLowerCase() === "v" && setFlip(false);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", release);
+    };
+  }, []);
+
+  const dropMarker = useCallback(
+    async (tag?: NoteTag) => {
+      if (!cut) return;
+      const t = Math.max(0, controller.state.time - (controller.state.playing ? 250 : 0));
+      try {
+        const n = await api<Note>(`/api/cuts/${cut.id}/notes`, { body: { t: Math.round(t), rev: cut.rev, text: "", tag, against: compare?.rev } });
+        if (!controller.state.playing) setSelectedNote(n.id);
+        setTab("cues");
+        push(`${tag ? `${TAGS.find((x) => x.id === tag)?.label} marker` : "Marker"} at ${tc(t)}`);
+      } catch (e) {
+        push(e instanceof Error ? e.message : String(e), "error");
+      }
+    },
+    [cut, controller, compare?.rev, push],
+  );
+
+  const nextUnwritten = useCallback(
+    (after?: string) => {
+      const list = cues.filter(unwritten);
+      if (!list.length) {
+        setSelectedNote(undefined);
+        return;
+      }
+      const from = after ? cues.findIndex((n) => n.id === after) : -1;
+      const next = list.find((n) => cues.indexOf(n) > from && n.id !== after) ?? list.find((n) => n.id !== after);
+      if (!next) return setSelectedNote(undefined);
+      controller.pause();
+      controller.seek(next.displayT);
+      setSelectedNote(next.id);
+      setTab("cues");
+      setTimeout(() => composer.current?.focus(), 0);
+    },
+    [cues, controller],
+  );
+
+  const chooseLayer = useCallback(
+    (l: { id: number; name: string; text?: string }, t: number) => {
+      if (!cut) return;
+      setPicker(undefined);
+      setTool(undefined);
+      const name = l.text ? `${l.name}` : l.name;
+      setTarget({ layerId: l.id, name, measuring: true });
+      setTab("cues");
+      void api<{ box: NoteTarget["box"] | null }>(`/api/cuts/${cut.id}/target`, { body: { rev: cut.rev ?? cut.latest?.n, t: Math.round(t), layerId: l.id } })
+        .then((r) => setTarget((cur) => (cur?.layerId === l.id ? { layerId: l.id, name, box: r.box ?? undefined } : cur)))
+        .catch(() => setTarget((cur) => (cur?.layerId === l.id ? { layerId: l.id, name } : cur)));
+      setTimeout(() => composer.current?.focus(), 0);
+    },
+    [cut],
+  );
+
+  const openPicker = useCallback(
+    (at: { clientX: number; clientY: number }) => {
+      if (!cut) return;
+      controller.pause();
+      const t = controller.state.time;
+      setPicker({ x: at.clientX + 8, y: at.clientY + 8, t });
+      void api<{ layers: ContextLayer[] }>(`/api/cuts/${cut.id}/context?t=${Math.round(t)}${cut.rev !== undefined ? `&rev=${cut.rev}` : ""}`)
+        .then((r) => setPicker((p) => (p && p.t === t ? { ...p, layers: r.layers } : p)))
+        .catch(() => setPicker((p) => (p && p.t === t ? { ...p, layers: [] } : p)));
+    },
+    [cut, controller],
+  );
+
+  const noteFinding = useCallback(
+    async (fd: Finding) => {
+      if (!cut) return;
+      const tag: NoteTag | undefined = /clip|audio|music|sound|loud/i.test(fd.rule) ? "audio" : /text|caption|cta|font|copy|credit/i.test(fd.rule) ? "text" : /cut|pace|length|open|hook/i.test(fd.rule) ? "timing" : undefined;
+      try {
+        const n = await api<Note>(`/api/cuts/${cut.id}/notes`, { body: { t: Math.round(fd.atMs ?? controller.state.time), rev: cut.rev, text: fd.message.charAt(0).toUpperCase() + fd.message.slice(1), tag } });
+        controller.pause();
+        controller.seek(n.displayT);
+        setSelectedNote(n.id);
+        setTab("cues");
+      } catch (e) {
+        push(e instanceof Error ? e.message : String(e), "error");
+      }
+    },
+    [cut, controller, push],
+  );
+
+  const jumpChange = useCallback(
+    (dir: 1 | -1) => {
+      const secs = diff ? diff.seconds.filter((x) => x.picture !== "same" || x.sound !== "same").map((x) => x.s) : (cut?.changedSegments ?? []);
+      if (!secs.length) return push(compare ? `Nothing changed between r${viewingRev} and r${compare.rev}` : "Nothing changed since the previous revision");
+      const now = Math.floor(controller.state.time / 1000);
+      const runs = secs.filter((x, i) => i === 0 || secs[i - 1] !== x - 1);
+      const next = dir > 0 ? runs.find((x) => x > now) : [...runs].reverse().find((x) => x < now);
+      if (next === undefined) return push(dir > 0 ? "That was the last change" : "That was the first change");
+      controller.pause();
+      controller.seek(next * 1000 + 1);
+    },
+    [diff, cut?.changedSegments, compare, viewingRev, controller, push],
+  );
+
+  const fixNote = fix ? cues.find((n) => n.id === fix.ids[fix.i]) : undefined;
+  const latestN = cut?.revisions.at(-1)?.n;
+
+  const showFix = useCallback(
+    (n: Note) => {
+      if (!cut) return;
+      const t = n.displayT;
+      controller.pause();
+      controller.seek(t);
+      controller.setLoop({ in: Math.max(0, t - 1500), out: t + 1500 });
+      setSelectedNote(n.id);
+      const old = cut.revisions.find((r) => r.n === n.rev);
+      if (old && n.rev !== latestN && (old.hasMovie || old.restorable)) setCompare((c) => ({ rev: n.rev, mode: c?.mode === "side" ? "side" : "wipe", pos: c?.pos ?? 50, src: c?.rev === n.rev ? c.src : undefined }));
+      else setCompare(undefined);
+      setTimeout(() => controller.play(), 120);
+    },
+    [cut, controller, latestN],
+  );
+
+  const startFix = useCallback(() => {
+    const list = cues.filter((n) => n.status === "addressed" && n.kind === "note");
+    if (!list.length) return;
+    setViewRev(undefined);
+    setTool(undefined);
+    setFix({ ids: list.map((n) => n.id), i: 0, resolved: 0, reopened: 0, skipped: 0, replying: false });
+    showFix(list[0]);
+  }, [cues, showFix]);
+
+  const endFix = useCallback(
+    (f: NonNullable<typeof fix>) => {
+      setFix(undefined);
+      controller.pause();
+      controller.setLoop(undefined);
+      setCompare(undefined);
+      const parts = [f.resolved && `${f.resolved} resolved`, f.reopened && `${f.reopened} reopened`, f.skipped && `${f.skipped} skipped`].filter(Boolean);
+      push(parts.length ? `Checked the fixes: ${parts.join(", ")}` : "Stopped checking fixes");
+    },
+    [controller, push],
+  );
+
+  const advanceFix = useCallback(
+    (outcome: "resolved" | "reopened" | "skipped") => {
+      if (!fix) return;
+      const next = { ...fix, [outcome]: fix[outcome] + 1, i: fix.i + 1, replying: false };
+      if (next.i >= next.ids.length) return endFix(next);
+      setFix(next);
+      const n = cues.find((x) => x.id === next.ids[next.i]);
+      if (n) showFix(n);
+    },
+    [fix, cues, endFix, showFix],
+  );
+
+  const resolveFix = useCallback(async () => {
+    if (!cut || !fixNote) return;
+    try {
+      await api(`/api/cuts/${cut.id}/notes/${fixNote.id}`, { method: "PATCH", body: { status: "resolved" } });
+      advanceFix("resolved");
+    } catch (e) {
+      push(e instanceof Error ? e.message : String(e), "error");
+    }
+  }, [cut, fixNote, advanceFix, push]);
+
+  const reopenFix = useCallback(
+    async (text: string) => {
+      if (!cut || !fixNote) return;
+      try {
+        await api(`/api/cuts/${cut.id}/notes/${fixNote.id}/reply`, { body: { text, status: "open" } });
+        advanceFix("reopened");
+      } catch (e) {
+        push(e instanceof Error ? e.message : String(e), "error");
+      }
+    },
+    [cut, fixNote, advanceFix, push],
+  );
 
   const seekNote = useCallback(
     (dir: 1 | -1) => {
@@ -289,8 +500,37 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
       if (e.target instanceof HTMLElement && e.target.getAttribute("role") === "slider" && /^(arrow|home|end|page)/.test(k)) return;
       if (e.ctrlKey && k === "enter") return void (e.preventDefault(), composer.current?.send());
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (fix && fixNote && !fix.replying) {
+        const fixMap: Record<string, () => void> = {
+          enter: () => void resolveFix(),
+          r: () => (controller.pause(), setFix((f) => f && { ...f, replying: true })),
+          arrowright: () => advanceFix("skipped"),
+          escape: () => endFix(fix),
+        };
+        if (fixMap[k] && !e.shiftKey) {
+          e.preventDefault();
+          return fixMap[k]();
+        }
+      }
+      if (k === "v") {
+        e.preventDefault();
+        if (e.repeat) return;
+        if (!compare) return push("Pick a revision to compare first: C, or Shift-click a revision");
+        return setFlip(true);
+      }
+      if (e.key === "?") return void (e.preventDefault(), openSettings("keyboard"));
+      if (k === "tab" && (e.shiftKey || !cues.some(unwritten))) return;
+      const id = e.shiftKey && /^[a-z]$/.test(k) ? `shift+${k}` : k;
       const loop = controller.state.loop;
       const map: Record<string, () => void> = {
+        m: () => void dropMarker(),
+        ...Object.fromEntries(TAGS.map((t) => [t.key, () => void dropMarker(t.id)])),
+        "shift+m": () => controller.setMuted(!(controller.state.muted || controller.state.volume === 0)),
+        t: () => (controller.pause(), setTool((x) => (x === "target" ? undefined : "target"))),
+        h: () => (compare ? controller.setHearCompare(!controller.state.hearCompare) : push("Pick a revision to compare first: C, or Shift-click a revision")),
+        g: () => jumpChange(1),
+        "shift+g": () => jumpChange(-1),
+        tab: () => nextUnwritten(cues.find((n) => n.id === selectedNote && unwritten(n))?.id),
         " ": () => controller.toggle(),
         k: () => controller.toggle(),
         j: () => controller.shuttleBack(),
@@ -310,17 +550,16 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
         a: () => (controller.pause(), setTool((t) => (t === "arrow" ? undefined : "arrow"))),
         d: () => (controller.pause(), setTool((t) => (t === "pen" ? undefined : "pen"))),
         p: () => (controller.pause(), setTool((t) => (t === "pin" ? undefined : "pin"))),
-        escape: () => (tool ? setTool(undefined) : pending.length ? setPending([]) : setSelectedLayer(undefined)),
+        escape: () => (tool ? setTool(undefined) : pending.length ? setPending([]) : target ? setTarget(undefined) : setSelectedLayer(undefined)),
         "[": () => seekNote(-1),
         "]": () => seekNote(1),
         s: () => setSafe((v) => !v),
-        m: () => controller.setMuted(!(controller.state.muted || controller.state.volume === 0)),
         arrowup: () => controller.nudgeVolume(0.05),
         arrowdown: () => controller.nudgeVolume(-0.05),
         c: () => toggleCompare(),
         f: () => void (document.fullscreenElement ? document.exitFullscreen() : stage.current?.requestFullscreen()),
       };
-      const fn = map[k];
+      const fn = map[id];
       if (fn) {
         e.preventDefault();
         fn();
@@ -373,48 +612,69 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     : 9 / 16;
   const duration = durationMs || cut.latest?.durationMs || 0;
   const drafts = cut.notes.filter((n) => n.status === "draft").length;
+  const rangeKey = loop ? `${Math.round(loop.in)}-${Math.round(loop.out)}` : undefined;
+  const noteRange = loop && rangeKey !== rangeOff && !fix ? loop : undefined;
+  const pinned = new Set([viewing, compare?.rev, cut.approvedRev].filter((x): x is number => x !== undefined));
+  const strip = cut.revisions.filter((r, i, all) => i >= all.length - 6 || pinned.has(r.n));
 
   return (
-    <div className="grid h-full grid-rows-[48px_1fr_auto]">
+    <div className="grid h-full grid-cols-[minmax(0,1fr)] grid-rows-[48px_1fr_auto]">
       <header className="drag flex items-center gap-3 pr-[150px] pl-2">
         <Button variant="ghost" onClick={onBack} className="text-dim">
           <ChevronLeft className="size-4" />
           <Mark size={18} />
         </Button>
-        <div className="min-w-0">
+        <div className="min-w-0 truncate" title={cut.folder !== cut.name ? `${cut.name}, ${cut.folder}` : cut.name}>
           <span className="font-semibold">{cut.name}</span>
           {cut.folder !== cut.name && <span className="ml-2.5 text-dim">{cut.folder}</span>}
         </div>
-        <IconButton label="Show in Explorer" side="bottom" onClick={() => void window.dailies?.reveal(cut.path)}>
+        <IconButton label="Show in Explorer" side="bottom" onClick={() => void window.slate?.reveal(cut.path)}>
           <FolderOpen />
         </IconButton>
         <div className="flex min-w-0 flex-1 justify-center px-4">{gutter < PRESENCE_MIN && <Presence cut={cut} inline />}</div>
         <div className="no-drag flex gap-0.5 rounded-lg bg-panel p-[3px]">
-          {cut.revisions.slice(-6).map((r) => (
-            <Tip key={r.n} label={`${r.author}, ${ago(r.at)}: ${r.summary}`} side="bottom">
-              <button
-                onClick={() => setViewRev(r.n === latest?.n ? undefined : r.n)}
-                className={cn("flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold", viewing === r.n ? "bg-raised text-text" : "text-dim hover:text-text")}
-              >
-                <i className={cn("size-1.5 rounded-full", r.authorKind === "agent" ? "bg-teal" : r.authorKind === "you" ? "bg-amber" : "bg-faint")} />r{r.n}
-              </button>
-            </Tip>
-          ))}
+          {strip.map((r) => {
+            const usable = r.hasMovie || r.restorable;
+            return (
+              <Tip key={r.n} label={usable ? `${r.author}, ${ago(r.at)}: ${r.summary}. Shift-click to compare` : `r${r.n} was not kept on disk, so it cannot be played`} side="bottom">
+                <button
+                  onClick={(e) => {
+                    if (!usable && r.n !== latest?.n) return;
+                    if (e.shiftKey) return r.n === viewing ? push(`You are already watching r${r.n}`) : toggleCompare(r.n);
+                    setViewRev(r.n === latest?.n ? undefined : r.n);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-2.5 py-1 font-semibold",
+                    viewing === r.n ? "bg-raised text-text" : compare?.rev === r.n ? "bg-raised/60 text-soft" : "text-dim hover:text-text",
+                    !usable && r.n !== latest?.n && "cursor-not-allowed text-faint hover:text-faint",
+                  )}
+                >
+                  <i className={cn("size-1.5 rounded-full", r.authorKind === "agent" ? "bg-teal" : r.authorKind === "you" ? "bg-amber" : "bg-faint")} />r{r.n}
+                  {compare && viewing === r.n && <span className="rounded bg-amber px-1 text-[10.5px] leading-[15px] text-amber-ink">A</span>}
+                  {compare?.rev === r.n && <span className="rounded bg-text px-1 text-[10.5px] leading-[15px] text-ink">B</span>}
+                </button>
+              </Tip>
+            );
+          })}
         </div>
         <Menu>
           <MenuTrigger asChild>
             <Button variant={compare ? "primary" : "quiet"}>{compare ? `${compare.src ? "Comparing" : "Preparing"} r${compare.rev}` : "Compare"}</Button>
           </MenuTrigger>
           <MenuContent>
-            {[...cut.revisions]
-              .reverse()
-              .filter((r) => r.n !== viewing && (r.hasMovie || r.restorable))
-              .slice(0, 6)
-              .map((r) => (
-                <MenuItem key={r.n} onSelect={() => toggleCompare(r.n)}>
-                  r{r.n} by {r.author}
-                </MenuItem>
-              ))}
+            <div className="max-h-[300px] overflow-y-auto">
+              {[...cut.revisions]
+                .reverse()
+                .filter((r) => r.n !== viewing)
+                .map((r) => (
+                  <MenuItem key={r.n} disabled={!(r.hasMovie || r.restorable)} onSelect={() => toggleCompare(r.n)}>
+                    <span className="min-w-0 flex-1 truncate">
+                      r{r.n} by {r.author}
+                    </span>
+                    <span className="shrink-0 text-[12px] text-faint">{r.hasMovie || r.restorable ? ago(r.at) : "not kept"}</span>
+                  </MenuItem>
+                ))}
+            </div>
             <MenuSeparator />
             <MenuItem onSelect={() => toggleCompare(undefined, "wipe")}>Wipe</MenuItem>
             <MenuItem onSelect={() => toggleCompare(undefined, "side")}>Side by side</MenuItem>
@@ -459,19 +719,25 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                 aspect={aspect}
                 revLabel={`r${viewing}`}
                 onGutter={setGutter}
+                flip={flip}
+                busy={!!tool}
                 compare={compare ? { src: compare.src, label: `r${compare.rev}`, mode: compare.mode, pos: compare.pos, onPos: (pos) => setCompare((c) => c && { ...c, pos }) } : undefined}
                 overlay={
                   <>
                     {safe && <SafeZones />}
+                    <div className="absolute inset-0" onPointerDown={(e) => e.altKey && (e.preventDefault(), openPicker(e))}>
                     <Sketch
                       tool={tool}
                       pending={pending}
                       shown={shown}
+                      onPick={openPicker}
+                      targetBox={target?.box}
                       onAdd={(a) => {
                         setPending((p) => [...p, a]);
                         composer.current?.focus();
                       }}
                     />
+                    </div>
                   </>
                 }
               />
@@ -485,6 +751,21 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
               </StagePlaceholder>
             )}
           </div>
+          {fix && fixNote && (
+            <FixCheck
+              note={fixNote}
+              index={fix.i}
+              total={fix.ids.length}
+              latest={latestN}
+              replying={fix.replying}
+              onReplying={(on) => setFix((f) => f && { ...f, replying: on })}
+              onResolve={() => void resolveFix()}
+              onReopen={(text) => void reopenFix(text)}
+              onSkip={() => advanceFix("skipped")}
+              onExit={() => endFix(fix)}
+              comparing={compare?.rev}
+            />
+          )}
           <div className="@container flex h-14 shrink-0 items-center gap-1 px-5">
             <IconButton label="Previous frame" keys="," onClick={() => controller.step(-1)}>
               <ChevronLeft />
@@ -497,6 +778,15 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
             </IconButton>
             <Clock controller={controller} duration={duration} rate={rate} />
             <div className="flex-1" />
+            {compare && (
+              <button
+                className={cn("mr-1 shrink-0 rounded-md px-2 py-1 text-[12.5px] hover:bg-raised", hearCompare ? "text-text" : "text-dim")}
+                onClick={() => controller.setHearCompare(!hearCompare)}
+                title="H switches which revision you hear. Hold V to flip the picture"
+              >
+                Hearing r{hearCompare ? compare.rev : viewing}
+              </button>
+            )}
             {loop && (
               <button className="mr-1 min-w-0 truncate rounded-md px-2 py-1 text-[12.5px] text-amber hover:bg-raised" onClick={() => controller.setLoop(undefined)}>
                 <span className="@max-[800px]:hidden">Looping </span>
@@ -566,7 +856,8 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                   controller.seek(ms);
                 }}
                 now={time}
-                range={loop}
+                range={noteRange}
+                onDismissRange={() => setRangeOff(rangeKey)}
                 tool={tool}
                 onTool={(t) => {
                   if (t) controller.pause();
@@ -575,13 +866,23 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                 pending={pending}
                 onClearPending={() => setPending([])}
                 captureMarked={captureMarked}
+                target={target}
+                onClearTarget={() => setTarget(undefined)}
+                against={compare?.rev}
+                onNextUnwritten={nextUnwritten}
+                onFixCheck={startFix}
                 toast={push}
               />
             </TabsContent>
             <TabsContent value="layers" className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
-              <Inspector cut={cut} time={time} paused={!playing} selected={selectedItem} onEdit={(r) => void edit(r)} />
+              <Inspector cut={cut} time={time} paused={!playing} selected={selectedItem} onEdit={(r) => void edit(r)} onNoteLayer={(l) => chooseLayer(l, controller.state.time)} />
             </TabsContent>
             <TabsContent value="history" className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
+              {diff && (
+                <div className="max-h-[45%] shrink-0 overflow-y-auto px-2">
+                  <ChangeList diff={diff} onSeek={(ms) => (controller.pause(), controller.seek(ms))} />
+                </div>
+              )}
               <History
                 cut={cut}
                 viewing={viewRev}
@@ -620,7 +921,13 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
           if (id !== undefined) setTab("layers");
         }}
         onRetime={(item, start, end) => void edit({ kind: "timing", layerId: item.id, start, end })}
+        diff={diff}
+        checks={checks}
+        peaks={peaks}
+        onNoteFinding={(fd) => void noteFinding(fd)}
       />
+
+      {picker && <LayerPicker at={picker} layers={picker.layers} onPick={(l) => chooseLayer(l, picker.t)} onClose={() => (setPicker(undefined), setTool(undefined))} />}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex flex-col items-center gap-2">
         {toasts.map((t) => (

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Film } from "lucide-react";
 import { cn } from "@/lib/format";
 
-export function Img({ src, className }: { src?: string; className?: string }) {
+export function Img({ src, className, onReady }: { src?: string; className?: string; onReady?: () => void }) {
   const [state, setState] = useState<"loading" | "ok" | "failed">("loading");
   useEffect(() => setState("loading"), [src]);
   if (!src || state === "failed") return null;
@@ -12,7 +12,10 @@ export function Img({ src, className }: { src?: string; className?: string }) {
       loading="lazy"
       decoding="async"
       draggable={false}
-      onLoad={() => setState("ok")}
+      onLoad={() => {
+        setState("ok");
+        onReady?.();
+      }}
       onError={() => setState("failed")}
       className={cn("absolute inset-0 size-full object-cover transition-opacity duration-200", state === "ok" ? "opacity-100" : "opacity-0", className)}
     />

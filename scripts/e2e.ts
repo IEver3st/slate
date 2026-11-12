@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { findCli } from "../daemon/tsrct";
 
 const [cutPath, cutId] = process.argv.slice(2);
-const info = JSON.parse(readFileSync(join(process.env.LOCALAPPDATA!, "Dailies", "daemon.json"), "utf8"));
+const info = JSON.parse(readFileSync(join(process.env.LOCALAPPDATA!, "Slate", "daemon.json"), "utf8"));
 const base = `http://127.0.0.1:${info.port}`;
-const H = { "x-dailies-token": info.token, "content-type": "application/json" };
+const H = { "x-slate-token": info.token, "content-type": "application/json" };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const results: { step: string; ok: boolean; detail: string }[] = [];
 const check = (step: string, ok: boolean, detail: unknown) => {
@@ -43,7 +43,7 @@ async function nextRevision(after: number, timeoutMs = 20_000) {
   throw new Error(`no revision after r${after} within ${timeoutMs} ms`);
 }
 async function agentApply(actions: unknown[]) {
-  const f = join(process.env.TEMP!, `dailies-e2e-${Date.now()}.json`);
+  const f = join(process.env.TEMP!, `slate-e2e-${Date.now()}.json`);
   writeFileSync(f, JSON.stringify(actions));
   const before = statSync(cutPath, { bigint: true }).ino;
   const p = Bun.spawn([findCli(), "project", "apply", "--project", cutPath, "--actions", f], { stdout: "pipe", stderr: "pipe" });
@@ -70,7 +70,7 @@ const startRev = d.rev;
 console.log(`cut ${d.name} at r${startRev}`);
 await renderDone("initial");
 
-const open = await mcp("dailies_open", { path: cutPath, message: "E2E: checking publish after ingest" });
+const open = await mcp("slate_open", { path: cutPath, message: "E2E: checking publish after ingest" });
 check("mcp open links thread", !open.error && open.data.threadLinked === true, { revision: open.data.revision, threadLinked: open.data.threadLinked });
 d = await detail();
 check("thread link stored", !!d.collaborators.at(-1)?.link?.startsWith("http://127.0.0.1:"), d.collaborators.at(-1));
@@ -87,30 +87,30 @@ d = first.d;
 const ingested = d.revisions.at(-1);
 check("watcher ingested agent save before publish", ingested.n === startRev + 1, { n: ingested.n, ms: first.ms, author: ingested.author, published: ingested.published, inPlace: applied.inPlace });
 await sleep(1000);
-const pub = await mcp("dailies_publish", { cut: cutPath, summary: "Sunday caption shows a counter", addresses: [noteA.id] });
+const pub = await mcp("slate_publish", { cut: cutPath, summary: "Sunday caption shows a counter", addresses: [noteA.id] });
 d = await detail();
 const last = d.revisions.at(-1);
 const na = d.notes.find((n: any) => n.id === noteA.id);
 check("publish after ingest credits agent", !pub.error && pub.data.published === ingested.n && !pub.data.warning && last.author === "E2E agent" && last.summary === "Sunday caption shows a counter" && last.published, { pub: pub.data, last: { n: last.n, author: last.author, summary: last.summary, published: last.published } });
 check("publish marks addressed notes", na.status === "addressed" && pub.data.addressed?.includes(noteA.id), { status: na.status, thread: na.thread.at(-1)?.text });
-const again = await mcp("dailies_publish", { cut: cutPath, summary: "again" });
+const again = await mcp("slate_publish", { cut: cutPath, summary: "again" });
 check("second publish warns", !!again.data.warning && !again.data.newRevision, again.data.warning?.slice(0, 90));
 const textRender = await renderDone("agent text");
 check("text edit re-rendered changed seconds", true, { ms: textRender.ms, changed: last.changedSeconds });
 
 const sinceWait = new Date().toISOString();
-await mcp("dailies_reply", { cut: cutPath, note: noteB.id, text: "Looking", status: "claimed" });
+await mcp("slate_reply", { cut: cutPath, note: noteB.id, text: "Looking", status: "claimed" });
 const w0 = Date.now();
-const waited = await mcp("dailies_wait", { cut: cutPath, since: sinceWait, timeoutSec: 3 });
+const waited = await mcp("slate_wait", { cut: cutPath, since: sinceWait, timeoutSec: 3 });
 check("wait ignores agent's own reply", (waited.data.changed ?? []).length === 0 && Date.now() - w0 > 2500, { changed: waited.data.changed, ms: Date.now() - w0 });
 
 const music = d.timeline.find((t: any) => t.type === "Audio" && /music/i.test(t.name));
-const logBefore = readFileSync(join(process.env.LOCALAPPDATA!, "Dailies", "daemon.log"), "utf8").length;
+const logBefore = readFileSync(join(process.env.LOCALAPPDATA!, "Slate", "daemon.log"), "utf8").length;
 const vol = await api(`/api/cuts/${cutId}/edits`, { edits: [{ kind: "volume", layerId: music.id, db: -6 - (Date.now() % 4000) / 1000 }], force: true });
 check("volume edit accepted", vol.status === 200, vol.data);
 await sleep(1500);
 const audioRender = await renderDone("audio only");
-const logAfter = readFileSync(join(process.env.LOCALAPPDATA!, "Dailies", "daemon.log"), "utf8").slice(logBefore);
+const logAfter = readFileSync(join(process.env.LOCALAPPDATA!, "Slate", "daemon.log"), "utf8").slice(logBefore);
 check("music volume renders audio only", /\(audio only\)/.test(logAfter) && !/rendered [^\n]*\d-\d+ in[^\n]*\n/.test(logAfter.replace(/[^\n]*\(audio only\)[^\n]*\n/g, "")), { ms: audioRender.ms, log: logAfter.trim().split("\n").filter((l) => l.includes("rendered")) });
 d = await detail();
 
@@ -146,7 +146,7 @@ check("watcher ingests the agent save promptly", late.ms < 2500, { ms: late.ms, 
 const youEdit = await api(`/api/cuts/${cutId}/edits`, { edits: [{ kind: "volume", layerId: music.id, db: -10 - (Date.now() % 30) / 10 }], force: true });
 await sleep(3500);
 d = await detail();
-const lateAgentPub = await mcp("dailies_publish", { cut: cutPath, summary: "Late publish after Manuel's edit", addresses: [lateNote.id] });
+const lateAgentPub = await mcp("slate_publish", { cut: cutPath, summary: "Late publish after Manuel's edit", addresses: [lateNote.id] });
 d = await detail();
 const claimed = d.revisions.find((r: any) => r.n === agentRev);
 check("publish claims agent revision under Manuel's edit", lateAgentPub.data.published === agentRev && claimed.author === "E2E agent" && claimed.published && d.revisions.at(-1).author === "You" && d.notes.find((n: any) => n.id === lateNote.id).status === "addressed", { youEdit: youEdit.status, published: lateAgentPub.data.published, agentRev, latest: [d.revisions.at(-1).n, d.revisions.at(-1).author] });
@@ -158,7 +158,7 @@ const restored = d.timeline.find((t: any) => t.id === music.id).volume;
 const original = d.notes.find((n: any) => n.id === youEdit.data.id).expect?.[0]?.before;
 check("undo restores the exact volume", undoVol.status === 200 && Math.abs(restored - original) < 1e-5, { restored, original });
 
-const fb = await mcp("dailies_feedback", { cut: cutPath });
+const fb = await mcp("slate_feedback", { cut: cutPath });
 check("feedback returns now", typeof fb.data.now === "string" && !Number.isNaN(Date.parse(fb.data.now)), fb.data.now);
 
 const target = d.revisions.filter((r: any) => r.restorable && r.n < d.rev).at(-1);
@@ -177,11 +177,11 @@ await agentApply([{ type: "animatorSetTextContent", compositionId: "main", layer
 await sleep(4000);
 d = await detail();
 const raceRevs = d.revisions.slice(revsBeforeRace).map((r: any) => [r.n, r.author, r.summary]);
-check("agent save right after a Dailies edit is not credited to you", raceEdit.status === 200 && d.revisions.at(-1).author !== "You", { edit: raceEdit.status, revisions: raceRevs });
+check("agent save right after a Slate edit is not credited to you", raceEdit.status === 200 && d.revisions.at(-1).author !== "You", { edit: raceEdit.status, revisions: raceRevs });
 await renderDone("after race");
 
 if (process.env.E2E_DELIVER) {
-  await api(`/api/cuts/${cutId}/notes`, { t: 4500, text: "E2E delivery check: Dailies sends this to the linked T3 thread", status: "draft" });
+  await api(`/api/cuts/${cutId}/notes`, { t: 4500, text: "E2E delivery check: Slate sends this to the linked T3 thread", status: "draft" });
   const sent = await api(`/api/cuts/${cutId}/publish`, {});
   check("send delivers to linked thread", sent.data.published === 1 && sent.data.delivered.length > 0, sent.data);
 }

@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { ArrowLeft, Check, FolderOpen, Search, Settings as Gear, X } from "lucide-react";
 import { api, media, type CutSummary, type LibraryFile } from "@/lib/api";
 import { useActivity, useCuts } from "@/lib/store";
-import { ago, cn, plural, tc } from "@/lib/format";
-import { Button, IconButton, Tip } from "./ui/button";
+import { ago, cn, plural } from "@/lib/format";
+import { Button, IconButton } from "./ui/button";
 import { Img, Blank } from "./ui/img";
 import { Heading } from "./ui/heading";
 import { AgentsPresence, Rail, togglePanel, usePanelShown } from "./Rail";
@@ -20,63 +20,12 @@ export type OpenTarget = {
   tab?: string;
 };
 
-const STRIP_MAX = 24;
 const STACK_MIN = 10;
+const SCRUB_FRAMES = 48;
 
 function short(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function aspectLabel(w: number, h: number) {
-  const r = w / h;
-  for (const [a, b] of [
-    [9, 16],
-    [16, 9],
-    [1, 1],
-    [4, 5],
-    [4, 3],
-    [3, 4],
-    [21, 9],
-  ])
-    if (Math.abs(r - a / b) < 0.01) return `${a}:${b}`;
-  return `${w}x${h}`;
-}
-
-function listed(parts: string[]) {
-  return parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
-}
-
-function changedText(l: NonNullable<CutSummary["latest"]>) {
-  if (l.n === 1) return "First revision";
-  if (!l.changed.length) return "No visible changes";
-  const s = [...l.changed].sort((a, b) => a - b);
-  const ranges: [number, number][] = [];
-  for (const x of s) {
-    const last = ranges.at(-1);
-    if (last && x === last[1] + 1) last[1] = x;
-    else ranges.push([x, x]);
-  }
-  const span = ([a, b]: [number, number]) => `${short(a * 1000)} to ${short(Math.min((b + 1) * 1000, l.durationMs))}`;
-  if (ranges.length > 3) return `Changed ${ranges.length} spans between ${short(ranges[0][0] * 1000)} and ${short(Math.min((ranges.at(-1)![1] + 1) * 1000, l.durationMs))}`;
-  return `Changed ${listed(ranges.map(span))}`;
-}
-
-function cutStatus(c: CutSummary): { text: string; tone: string } {
-  if (c.missing) return { text: "File moved or deleted", tone: "text-red" };
-  if (c.render.failed) return { text: "Some seconds failed to render", tone: "text-red" };
-  if (c.render.rendering && c.render.total)
-    return {
-      text: `Rendering, ${c.render.ready} of ${c.render.total} seconds`,
-      tone: "text-soft",
-    };
-  if (c.approvedRev && c.latest && c.approvedRev === c.latest.n)
-    return {
-      text: `Approved r${c.approvedRev}`,
-      tone: "text-dim",
-    };
-  if (c.latest) return { text: `r${c.latest.n}, ${ago(c.latest.at)}`, tone: "text-dim" };
-  return { text: "Reading project", tone: "text-dim" };
 }
 
 function useWidth<T extends HTMLElement>() {
@@ -91,43 +40,6 @@ function useWidth<T extends HTMLElement>() {
     return () => ro.disconnect();
   }, []);
   return [ref, width] as const;
-}
-
-function Strip({ cut, maxH, onSeek }: { cut: CutSummary; maxH: number; onSeek: (ms: number) => void }) {
-  const l = cut.latest!;
-  const total = Math.max(1, l.segments);
-  const n = Math.min(total, STRIP_MAX);
-  const changed = new Set(l.changed);
-  const highlight = l.n > 1 && changed.size > 0;
-  const cells = Array.from({ length: n }, (_, i) => {
-    const a = Math.floor((i * total) / n);
-    const b = Math.max(a + 1, Math.floor(((i + 1) * total) / n));
-    let hit = -1;
-    for (let s = a; s < b && hit < 0; s++) if (changed.has(s)) hit = s;
-    return { s: hit >= 0 ? hit : a, on: hit >= 0 };
-  });
-  const retry = cut.render.rendering ? `&r=${cut.render.ready}` : "";
-  return (
-    <div
-      className="grid gap-[3px]"
-      style={{
-        gridTemplateColumns: `repeat(${n}, minmax(0, ${Math.round((maxH * l.width) / l.height)}px))`,
-      }}
-    >
-      {cells.map((c) => (
-        <button
-          key={c.s}
-          title={`${tc(c.s * 1000)}${c.on ? ", changed" : ""}`}
-          onClick={() => onSeek(c.s * 1000)}
-          className="relative overflow-hidden rounded-[4px] bg-well"
-          style={{ aspectRatio: `${l.width} / ${l.height}` }}
-        >
-          <Img src={media(`/api/cuts/${cut.id}/thumb?rev=${l.n}&h=${l.hash}&s=${c.s}${retry}`)} className={highlight && !c.on ? "!opacity-50" : undefined} />
-          {c.on && <span className="pointer-events-none absolute inset-0 rounded-[4px] shadow-[inset_0_0_0_2px_var(--color-amber)]" />}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 function RemoveButton({ onRemove, className }: { onRemove: () => void; className?: string }) {
@@ -146,142 +58,12 @@ function RemoveButton({ onRemove, className }: { onRemove: () => void; className
     );
   return (
     <IconButton
-      label="Remove from Dailies"
+      label="Remove from Slate"
       onClick={() => (confirm ? setArmed(true) : onRemove())}
       className={cn("size-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [&_svg]:size-4", className)}
     >
       <X />
     </IconButton>
-  );
-}
-
-function AgentLine({ cut }: { cut: CutSummary }) {
-  const l = cut.latest;
-  const a = cut.agent;
-  if (a?.state === "blocked")
-    return (
-      <Line dot="bg-amber">
-        <b className="font-semibold">{a.name}</b> <span className="text-amber">needs you</span>
-        <span className="text-faint">{ago(a.at)}</span>
-      </Line>
-    );
-  if (a && isWorking(cut))
-    return (
-      <Line dot="bg-teal animate-pulse">
-        <b className="font-semibold">{a.name}</b> <span className="text-soft">is working</span>
-        <span className="text-faint">{ago(a.at)}</span>
-      </Line>
-    );
-  if (!l) return null;
-  return (
-    <Line dot={l.author.kind === "agent" ? "bg-teal" : "bg-amber"}>
-      <b className="font-semibold">{l.author.name}</b>
-      <span className="text-soft">{l.author.kind === "agent" ? "published" : "saved"}</span>
-      <b className="font-semibold text-amber">r{l.n}</b>
-      <span className="text-faint">{ago(l.at)}</span>
-    </Line>
-  );
-}
-
-function Line({ dot, children }: { dot: string; children: ReactNode }) {
-  return (
-    <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[14px]">
-      <i className={cn("size-[7px] shrink-0 rounded-full", dot)} />
-      {children}
-    </div>
-  );
-}
-
-function InboxCard({ cut, wide, onOpen, onRemove, onApproved }: { cut: CutSummary; wide?: boolean; onOpen: (t: OpenTarget) => void; onRemove: () => void; onApproved: () => void }) {
-  const l = cut.latest!;
-  const portrait = l.height >= l.width;
-  const working = isWorking(cut);
-  const [approving, setApproving] = useState(false);
-  const body = cut.agent?.state === "blocked" ? cut.agent.text : working ? cut.agent?.text || l.summary : l.summary;
-  const changed = cut.render.rendering && cut.render.total ? `Rendering, ${cut.render.ready} of ${cut.render.total} seconds ready` : changedText(l);
-
-  async function approve() {
-    setApproving(true);
-    try {
-      await api(`/api/cuts/${cut.id}/approve`, { body: { rev: l.n } });
-      onApproved();
-    } finally {
-      setApproving(false);
-    }
-  }
-
-  return (
-    <article className="group grid grid-cols-[auto_minmax(0,1fr)] gap-5 rounded-[14px] bg-panel p-4">
-      <button
-        onClick={() => onOpen({ cutId: cut.id })}
-        className={cn("relative self-start overflow-hidden rounded-[9px] bg-well", portrait ? "aspect-[9/16] w-[132px]" : "aspect-video w-[220px]")}
-        aria-label={`Review ${cut.name}`}
-      >
-        <Blank />
-        <Img src={cutPoster(cut)} />
-      </button>
-      <div className="flex min-w-0 flex-col">
-        <div className="flex items-start gap-3">
-          <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2.5">
-            <span className="text-[18px] leading-snug font-semibold [overflow-wrap:anywhere]">{cut.name}</span>
-            <span className="text-dim">{cut.folder}</span>
-          </div>
-          <span className="pt-1 text-[13px] whitespace-nowrap text-faint">
-            {tc(l.durationMs)}, {aspectLabel(l.width, l.height)}
-          </span>
-          <RemoveButton onRemove={onRemove} className="-mt-0.5 -mr-1.5" />
-        </div>
-        <AgentLine cut={cut} />
-        {body && <p className="mt-1.5 max-w-[78ch] text-[14px] leading-snug text-soft">{body}</p>}
-        <div className="mt-3.5">
-          <Strip cut={cut} maxH={wide ? 220 : 150} onSeek={(t) => onOpen({ cutId: cut.id, t })} />
-        </div>
-        <div className={cn("mt-1.5 text-[12.5px]", l.n > 1 && l.changed.length ? "text-amber" : "text-dim")}>{changed}</div>
-        <div className="min-h-3 flex-1" />
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <div className="flex flex-wrap gap-1">
-            {cut.recent.map((r) => (
-              <Tip key={r.n} label={`${r.author.name}, ${ago(r.at)}`}>
-                <button
-                  onClick={() =>
-                    onOpen({
-                      cutId: cut.id,
-                      rev: r.n === l.n ? undefined : r.n,
-                    })
-                  }
-                  className={cn("inline-flex h-[24px] items-center gap-[5px] rounded-md bg-raised px-2 text-[12px] font-semibold hover:bg-hover", r.n === l.n ? "text-text" : "text-soft")}
-                >
-                  <i className={cn("size-1.5 rounded-full", r.author.kind === "agent" ? "bg-teal" : "bg-amber")} />r{r.n}
-                  {cut.approvedRev === r.n && <Check className="size-3 text-teal" strokeWidth={3} />}
-                </button>
-              </Tip>
-            ))}
-          </div>
-          <div className="flex-1" />
-          {(cut.openNotes > 0 || cut.draftNotes > 0) && (
-            <button onClick={() => onOpen({ cutId: cut.id, tab: "cues" })} className="text-[13px] text-soft hover:text-text">
-              {cut.openNotes > 0 && plural(cut.openNotes, "open note")}
-              {cut.openNotes > 0 && cut.draftNotes > 0 && ", "}
-              {cut.draftNotes > 0 && <span className="text-amber">{plural(cut.draftNotes, "draft")} not sent</span>}
-            </button>
-          )}
-          {working ? (
-            <Button onClick={() => onOpen({ cutId: cut.id })}>Watch r{l.n}</Button>
-          ) : (
-            <>
-              {awaitingReview(cut) && (
-                <Button variant="ghost" disabled={approving} onClick={() => void approve()}>
-                  Approve r{l.n}
-                </Button>
-              )}
-              <Button variant="primary" onClick={() => onOpen({ cutId: cut.id })}>
-                Review r{l.n}
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
-    </article>
   );
 }
 
@@ -294,6 +76,7 @@ type WallItem = {
   cut?: CutSummary;
   file?: LibraryFile;
   stack?: WallItem[];
+  fallback?: string;
 };
 
 function rows(items: WallItem[], width: number, target: number, gap: number) {
@@ -316,71 +99,204 @@ function rows(items: WallItem[], width: number, target: number, gap: number) {
   return out;
 }
 
+function filePoster(f: LibraryFile) {
+  return f.poster === false ? undefined : media(`/api/library/poster?path=${encodeURIComponent(f.path)}&v=${Math.round(f.mtimeMs)}-${f.size}`);
+}
+
 function itemPoster(it: WallItem) {
   if (it.cut) return cutPoster(it.cut);
-  if (it.file && it.file.poster !== false) return media(`/api/library/poster?path=${encodeURIComponent(it.file.path)}&v=${Math.round(it.file.mtimeMs)}-${it.file.size}`);
+  if (it.file) return filePoster(it.file);
   return undefined;
 }
 
-function itemMeta(it: WallItem): { text: string; tone: string } {
-  if (it.stack)
-    return {
-      text: `${it.stack.length} projects, ${ago(new Date(it.at).toISOString())}`,
-      tone: "text-faint",
-    };
-  if (it.cut) return cutStatus(it.cut);
-  const f = it.file!;
-  return {
-    text: [f.durationMs ? short(f.durationMs) : undefined, ago(new Date(f.mtimeMs).toISOString())].filter(Boolean).join(", "),
-    tone: "text-faint",
-  };
+function Meta({ it }: { it: WallItem }) {
+  if (it.stack) return <span className="text-faint">{plural(it.stack.length, "project")}, {ago(new Date(it.at).toISOString())}</span>;
+  if (it.file) {
+    const f = it.file;
+    return <span className="text-faint">{[f.durationMs ? short(f.durationMs) : undefined, ago(new Date(f.mtimeMs).toISOString())].filter(Boolean).join(", ")}</span>;
+  }
+  const c = it.cut!;
+  const l = c.latest;
+  if (c.missing) return <span className="text-red">File moved or deleted</span>;
+  if (c.render.failed) return <span className="text-red">Some seconds failed to render</span>;
+  if (c.agent?.state === "blocked") return <span className="text-amber">Waiting on your answer</span>;
+  if (isWorking(c))
+    return (
+      <span className="text-soft">
+        <i className="mr-2 inline-block size-[7px] rounded-full bg-teal align-middle motion-safe:animate-pulse" />
+        Agent working
+      </span>
+    );
+  if (c.render.rendering && c.render.total) return <span className="text-soft">Rendering {c.render.ready} of {c.render.total} s</span>;
+  if (!l) return <span className="text-faint">Reading project</span>;
+  if (c.draftNotes > 0) return <span className="text-amber">{plural(c.draftNotes, "note")} not sent</span>;
+  if (awaitingReview(c))
+    return (
+      <span className="text-dim">
+        <b className="font-semibold text-amber">r{l.n}</b> {ago(l.at)}
+      </span>
+    );
+  if (c.approvedRev === l.n)
+    return (
+      <span className="text-dim">
+        <Check className="mr-1 inline size-3.5 align-[-2px] text-teal" strokeWidth={2.5} />
+        Approved r{l.n}, {ago(l.at)}
+      </span>
+    );
+  return (
+    <span className="text-dim">
+      r{l.n}, {ago(l.at)}
+    </span>
+  );
 }
 
-function Wall({ items, busy, onPick, onRemove }: { items: WallItem[]; busy?: string; onPick: (it: WallItem) => void; onRemove: (c: CutSummary) => void }) {
-  const [ref, width] = useWidth<HTMLDivElement>();
-  const gap = 16;
-  const target = width > 1700 ? 250 : 220;
-  const laid = useMemo(() => (width ? rows(items, width, target, gap) : []), [items, width, target]);
+function Badges({ cut }: { cut: CutSummary }) {
+  if (!cut.draftNotes && !cut.openNotes) return null;
   return (
-    <div ref={ref} className="grid gap-y-6">
+    <div className="pointer-events-none absolute top-2 left-2 flex gap-1">
+      {cut.draftNotes > 0 && <span className="rounded-full bg-amber px-2 text-[12px] leading-[20px] font-bold text-amber-ink">{cut.draftNotes}</span>}
+      {cut.openNotes > 0 && <span className="rounded-full bg-ink/85 px-2 text-[12px] leading-[20px] font-semibold text-soft">{cut.openNotes}</span>}
+    </div>
+  );
+}
+
+function badgeLabel(cut: CutSummary) {
+  const parts = [cut.draftNotes ? `${plural(cut.draftNotes, "note")} not sent` : "", cut.openNotes ? `${plural(cut.openNotes, "open note")} with the agent` : ""].filter(Boolean);
+  return parts.length ? parts.join(", ") : undefined;
+}
+
+function useScrub(cut: CutSummary | undefined) {
+  const l = cut?.latest;
+  const frames = l && l.segments > 1 ? Math.min(l.segments, SCRUB_FRAMES) : 0;
+  const [at, setAt] = useState<{ i: number; moved: boolean }>();
+  const warmed = useRef(false);
+  const second = (i: number) => Math.floor((i * l!.segments) / frames);
+  const src = (s: number) => media(`/api/cuts/${cut!.id}/thumb?rev=${l!.n}&h=${l!.hash}&s=${s}&size=poster${cut!.render.rendering ? `&r=${cut!.render.ready}` : ""}`);
+  if (!frames) return { frames: 0 } as const;
+  return {
+    frames,
+    at,
+    second: at ? second(at.i) : undefined,
+    src: at ? src(second(at.i)) : undefined,
+    durationMs: l!.durationMs,
+    handlers: {
+      onPointerEnter() {
+        if (warmed.current) return;
+        warmed.current = true;
+        for (let i = 0; i < frames; i++) {
+          const url = src(second(i));
+          if (url) new Image().src = url;
+        }
+      },
+      onPointerMove(e: PointerEvent<HTMLElement>) {
+        const r = e.currentTarget.getBoundingClientRect();
+        const i = Math.min(frames - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * frames)));
+        setAt((p) => (p?.i === i ? p : { i, moved: !!p }));
+      },
+      onPointerLeave() {
+        setAt(undefined);
+      },
+    },
+  } as const;
+}
+
+function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: number; h: number; large?: boolean; busy?: boolean; onPick: (t?: number) => void; onRemove: () => void }) {
+  const scrub = useScrub(it.stack ? undefined : it.cut);
+  const blocked = it.cut?.agent?.state === "blocked" ? it.cut.agent.text : undefined;
+  const [posterShown, setPosterShown] = useState(false);
+  return (
+    <div className="group relative shrink-0" style={{ width: w }}>
+      <button
+        onClick={() => onPick(scrub.frames && scrub.at?.moved ? scrub.second! * 1000 : undefined)}
+        disabled={busy}
+        className="block w-full rounded-[12px] text-left"
+        title={it.file?.path ?? it.cut?.path}
+        {...(scrub.frames ? scrub.handlers : {})}
+      >
+        <div className="relative overflow-hidden rounded-[12px] bg-panel" style={{ height: h }}>
+          {it.stack ? (
+            <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 gap-[2px]">
+              {it.stack.slice(0, 4).map((x) => (
+                <div key={x.key} className="relative overflow-hidden bg-well">
+                  <Img src={itemPoster(x)} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              <Blank />
+              {it.fallback && !posterShown && <Img src={it.fallback} />}
+              <Img src={itemPoster(it)} onReady={() => setPosterShown(true)} />
+            </>
+          )}
+          {scrub.frames > 0 && scrub.src && (
+            <>
+              <img
+                src={scrub.src}
+                draggable={false}
+                onLoad={(e) => (e.currentTarget.style.visibility = "visible")}
+                onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                className="absolute inset-0 size-full object-cover"
+              />
+              <span className="absolute bottom-3 left-2.5 rounded-md bg-ink/85 px-1.5 text-[12px] leading-[20px] font-semibold">
+                {short(scrub.second! * 1000)} of {short(scrub.durationMs)}
+              </span>
+              <span className="absolute inset-x-0 bottom-0 h-[3px] bg-white/15">
+                <span className="block h-full bg-amber" style={{ width: `${((scrub.at!.i + 1) / scrub.frames) * 100}%` }} />
+              </span>
+            </>
+          )}
+          {busy && <div className="absolute inset-0 grid place-items-center bg-ink/70 text-[13px] font-semibold">Opening</div>}
+          {it.cut && (
+            <span title={badgeLabel(it.cut)}>
+              <Badges cut={it.cut} />
+            </span>
+          )}
+        </div>
+        <div className={cn("truncate leading-snug font-semibold text-text", large ? "mt-2.5 text-[14.5px]" : "mt-2 text-[13.5px]")}>{it.name}</div>
+        <div className={cn("truncate leading-snug", large ? "text-[13px]" : "text-[12.5px]")}>
+          <Meta it={it} />
+        </div>
+        {large && blocked && <p className="mt-1 line-clamp-2 text-[13px] leading-snug text-soft">{blocked}</p>}
+      </button>
+      {it.cut && <RemoveButton onRemove={onRemove} className="absolute top-1.5 right-1.5 bg-ink/80" />}
+    </div>
+  );
+}
+
+function Wall({ items, large, busy, onPick, onRemove }: { items: WallItem[]; large?: boolean; busy?: string; onPick: (it: WallItem, t?: number) => void; onRemove: (c: CutSummary) => void }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const gap = large ? 22 : 16;
+  const target = large ? (width > 1500 ? 400 : 340) : width > 1700 ? 250 : 214;
+  const laid = useMemo(() => (width ? rows(items, width, target, gap) : []), [items, width, target, gap]);
+  return (
+    <div ref={ref} className={cn("grid", large ? "gap-y-7" : "gap-y-6")}>
       {laid.map((row, i) => (
         <div key={i} className="flex items-start" style={{ gap }}>
-          {row.items.map((it) => {
-            const w = Math.floor(row.h * it.aspect);
-            const meta = itemMeta(it);
-            return (
-              <div key={it.key} className="group relative shrink-0" style={{ width: w }}>
-                <button onClick={() => onPick(it)} disabled={busy === it.key} className="block w-full rounded-[10px] text-left" title={it.file?.path ?? it.cut?.path}>
-                  <div className="relative overflow-hidden rounded-[10px] bg-panel" style={{ height: row.h }}>
-                    {it.stack ? (
-                      <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 gap-[2px]">
-                        {it.stack.slice(0, 4).map((x) => (
-                          <div key={x.key} className="relative overflow-hidden bg-well">
-                            <Img src={itemPoster(x)} className="transition-[opacity,filter] group-hover:brightness-110" />
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <>
-                        <Blank />
-                        <Img src={itemPoster(it)} className="transition-[opacity,filter] group-hover:brightness-110" />
-                      </>
-                    )}
-                    {busy === it.key && <div className="absolute inset-0 grid place-items-center bg-ink/70 text-[13px] font-semibold">Opening</div>}
-                    {it.cut && it.cut.openNotes + it.cut.draftNotes > 0 && (
-                      <span className="absolute top-2 left-2 rounded-full bg-amber px-2 text-[12px] leading-[20px] font-bold text-amber-ink">{it.cut.openNotes + it.cut.draftNotes}</span>
-                    )}
-                  </div>
-                  <div className="mt-2 text-[13.5px] leading-snug font-medium [overflow-wrap:anywhere] text-text">{it.name}</div>
-                  <div className={cn("text-[12.5px] leading-snug", meta.tone)}>{meta.text}</div>
-                </button>
-                {it.cut && <RemoveButton onRemove={() => onRemove(it.cut!)} className="absolute top-1.5 right-1.5 bg-ink/80" />}
-              </div>
-            );
-          })}
+          {row.items.map((it) => (
+            <Tile
+              key={it.key}
+              it={it}
+              large={large}
+              w={Math.floor(row.h * it.aspect)}
+              h={row.h}
+              busy={busy === it.key}
+              onPick={(t) => onPick(it, t)}
+              onRemove={() => it.cut && onRemove(it.cut)}
+            />
+          ))}
         </div>
       ))}
     </div>
+  );
+}
+
+function Section({ title, children }: { title: ReactNode; children: ReactNode }) {
+  return (
+    <section className="mb-10">
+      {title}
+      <div className="mt-3.5">{children}</div>
+    </section>
   );
 }
 
@@ -430,24 +346,33 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
       })),
     [cuts],
   );
-  const order = (a: CutSummary, b: CutSummary) => Number(b.agent?.state === "blocked") - Number(a.agent?.state === "blocked") || (b.latest?.at ?? "").localeCompare(a.latest?.at ?? "");
-  const inbox = all.filter((c) => needsYou(c) && matches(c.name, c.folder)).sort(order);
-  const working = all.filter((c) => !c.missing && isWorking(c) && matches(c.name, c.folder)).sort(order);
-  const active = new Set([...inbox, ...working].map((c) => c.id));
+
+  const files = useMemo(() => new Map(library.map((f) => [f.path.toLowerCase(), f])), [library]);
+  const toItem = (c: CutSummary): WallItem => ({
+    fallback: files.has(c.path.toLowerCase()) ? filePoster(files.get(c.path.toLowerCase())!) : undefined,
+    key: c.id,
+    aspect: c.latest ? c.latest.width / c.latest.height : 9 / 16,
+    name: c.name,
+    at: Date.parse(c.latest?.at ?? "") || 0,
+    group: c.folder,
+    cut: c,
+  });
+
+  const urgency = (c: CutSummary) => (c.agent?.state === "blocked" ? 0 : c.draftNotes > 0 ? 1 : isWorking(c) ? 2 : 3);
+  const fresh = useMemo(
+    () =>
+      all
+        .filter((c) => !c.missing && (needsYou(c) || isWorking(c)) && matches(c.name, c.folder))
+        .sort((a, b) => urgency(a) - urgency(b) || (b.latest?.at ?? "").localeCompare(a.latest?.at ?? ""))
+        .map(toItem),
+    [all, q, files],
+  );
+  const freshIds = new Set(fresh.map((i) => i.key));
   const known = new Set(all.map((c) => c.id));
 
   const wall = useMemo<WallItem[]>(() => {
     const byRecent = (a: WallItem, b: WallItem) => b.at - a.at;
-    const fromCuts: WallItem[] = all
-      .filter((c) => !active.has(c.id) && matches(c.name, c.folder))
-      .map((c) => ({
-        key: c.id,
-        aspect: c.latest ? c.latest.width / c.latest.height : 9 / 16,
-        name: c.name,
-        at: Date.parse(c.latest?.at ?? "") || 0,
-        group: c.folder,
-        cut: c,
-      }));
+    const fromCuts = all.filter((c) => (folder || !freshIds.has(c.id)) && matches(c.name, c.folder)).map(toItem);
     const fromFiles: WallItem[] = library
       .filter((f) => !(f.registered || (f.id && known.has(f.id))) && matches(f.name, `${f.folder} ${f.group ?? ""}`))
       .map((f) => ({
@@ -479,7 +404,7 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
         stack: list,
       });
     return out.sort(byRecent);
-  }, [cuts, library, q, folder]);
+  }, [all, library, q, folder, fresh]);
 
   async function openFile(path: string) {
     setBusy(path);
@@ -497,7 +422,7 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
   }
 
   async function pick() {
-    const files = (await window.dailies?.openFile()) ?? [];
+    const files = (await window.slate?.openFile()) ?? [];
     for (const f of files) await openFile(f);
   }
 
@@ -507,14 +432,22 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
     void refreshLibrary();
   }
 
+  function choose(it: WallItem, t?: number) {
+    if (it.stack) return setFolder(it.group);
+    if (it.cut) return onOpen({ cutId: it.cut.id, t });
+    void openFile(it.file!.path);
+  }
+
   const panel = usePanelShown(all, activity);
   const nothing = cuts && cuts.length === 0 && library.length === 0;
+  const showFresh = !folder && fresh.length > 0;
+  const total = wall.reduce((n, i) => n + (i.stack?.length ?? 1), 0);
 
   return (
     <div className="flex h-full flex-col">
       <header className="drag flex h-12 shrink-0 items-center gap-3 pr-[150px] pl-5">
         <Mark />
-        <span className="font-semibold">Dailies</span>
+        <span className="font-semibold">Slate</span>
         <UpdatePill />
         <div className="flex-1" />
         <label className="no-drag flex h-[34px] w-[320px] items-center gap-2 rounded-[9px] bg-panel px-3 text-faint focus-within:text-soft focus-within:ring-2 focus-within:ring-amber/60">
@@ -548,63 +481,44 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
         </IconButton>
       </header>
       <div className={cn("rail-grid grid min-h-0 flex-1 grid-cols-1 [--rail-open:340px] 2xl:[--rail-open:380px]", panel ? "lg:grid-cols-[minmax(0,1fr)_var(--rail-open)]" : "lg:grid-cols-[minmax(0,1fr)_0px]")}>
-        <main className="min-h-0 overflow-y-auto px-7 pt-3 pb-12">
+        <main className="min-h-0 overflow-y-auto px-8 pt-4 pb-12">
           {error && <div className="mb-4 rounded-lg bg-panel px-4 py-3 text-red">{error}</div>}
           {openError && <div className="mb-4 rounded-lg bg-panel px-4 py-3 text-red">{openError}</div>}
           {nothing && (
             <div className="mx-auto mt-24 max-w-md text-center">
               <div className="text-[17px] font-semibold">No projects yet</div>
-              <p className="mt-2 text-soft">Agents add their cut here when they call dailies_open. You can also open any .tsrct yourself.</p>
+              <p className="mt-2 text-soft">Agents add their cut here when they call slate_open. You can also open any .tsrct yourself.</p>
               <Button variant="primary" className="mt-5" onClick={pick}>
                 <FolderOpen className="size-4" />
                 Open project
               </Button>
             </div>
           )}
-          {inbox.length > 0 && (
-            <section className="mb-9">
-              <Heading count={inbox.length}>Needs you</Heading>
-              <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,740px),1fr))] gap-3.5">
-                {inbox.map((c) => (
-                  <InboxCard key={c.id} cut={c} wide={inbox.length === 1} onOpen={onOpen} onRemove={() => void remove(c.id)} onApproved={() => void refresh()} />
-                ))}
-              </div>
-            </section>
-          )}
-          {working.length > 0 && (
-            <section className="mb-9">
-              <Heading count={working.length}>Agents working</Heading>
-              <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,740px),1fr))] gap-3.5">
-                {working.map((c) => (
-                  <InboxCard key={c.id} cut={c} wide={working.length === 1} onOpen={onOpen} onRemove={() => void remove(c.id)} onApproved={() => void refresh()} />
-                ))}
-              </div>
-            </section>
+          {showFresh && (
+            <Section title={<Heading count={fresh.length}>New revisions</Heading>}>
+              <Wall items={fresh} large busy={busy} onPick={choose} onRemove={(c) => void remove(c.id)} />
+            </Section>
           )}
           {(wall.length > 0 || folder) && (
-            <section>
-              {folder ? (
-                <div className="flex items-center gap-3">
-                  <Button variant="ghost" size="sm" onClick={() => setFolder(undefined)} className="-ml-2.5">
-                    <ArrowLeft className="size-4" />
-                    All projects
-                  </Button>
-                  <Heading count={wall.length}>{folder}</Heading>
-                </div>
-              ) : (
-                <Heading count={wall.reduce((n, i) => n + (i.stack?.length ?? 1), 0)}>{inbox.length || working.length ? "Other projects" : "Projects"}</Heading>
-              )}
-              <div className="mt-3">
-                <Wall
-                  items={wall}
-                  busy={busy}
-                  onPick={(it) => (it.stack ? setFolder(it.group) : it.cut ? onOpen({ cutId: it.cut.id }) : void openFile(it.file!.path))}
-                  onRemove={(c) => void remove(c.id)}
-                />
-              </div>
-            </section>
+            <Section
+              title={
+                folder ? (
+                  <div className="flex items-center gap-3">
+                    <Button variant="ghost" size="sm" onClick={() => setFolder(undefined)} className="-ml-2.5">
+                      <ArrowLeft className="size-4" />
+                      All projects
+                    </Button>
+                    <Heading count={wall.length}>{folder}</Heading>
+                  </div>
+                ) : (
+                  <Heading count={total}>{showFresh ? "All projects" : "Projects"}</Heading>
+                )
+              }
+            >
+              <Wall items={wall} busy={busy} onPick={choose} onRemove={(c) => void remove(c.id)} />
+            </Section>
           )}
-          {terms.length > 0 && !inbox.length && !working.length && !wall.length && <p className="mt-16 text-center text-soft">No projects match “{q.trim()}”.</p>}
+          {terms.length > 0 && !fresh.length && !wall.length && <p className="mt-16 text-center text-soft">No projects match “{q.trim()}”.</p>}
         </main>
         <Rail cuts={all} activity={activity} onOpen={onOpen} />
       </div>

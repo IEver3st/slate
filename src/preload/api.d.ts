@@ -13,7 +13,7 @@ export type UpdateState = {
   failure?: { short: string; step: string; error: string };
 };
 
-export type DailiesBridge = {
+export type SlateBridge = {
   initialTheme?: ThemeChoice;
   updateState?(): Promise<UpdateState>;
   applyUpdate(): Promise<void>;
@@ -38,6 +38,6 @@ export type DailiesBridge = {
 
 declare global {
   interface Window {
-    dailies?: DailiesBridge;
+    slate?: SlateBridge;
   }
 }

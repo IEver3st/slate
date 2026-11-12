@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
-import { MoreHorizontal, Square, ArrowUpRight, PenLine, MapPin, X, CornerDownRight } from "lucide-react";
-import type { Annotation, CutDetail, Note } from "@/lib/api";
+import { MoreHorizontal, Square, ArrowUpRight, PenLine, MapPin, X, CornerDownRight, Crosshair } from "lucide-react";
+import type { Annotation, CutDetail, Note, NoteTag, NoteTarget } from "@/lib/api";
+import { TAGS, tagOf, sendable, unwritten } from "@/lib/tags";
 import { api, mediaUrl } from "@/lib/api";
 import { ago, cn, tc } from "@/lib/format";
 import { Button, IconButton } from "./ui/button";
@@ -112,6 +113,7 @@ function CueCard({
           {note.end !== undefined && note.end > note.t && <span className="font-normal text-dim"> to {tc(note.end + (note.displayT - note.t))}</span>}
         </button>
         {edit && <span className="text-[12.5px] text-soft">Edit</span>}
+        {note.tag && <span className={cn("rounded px-1.5 text-[12px] leading-[18px] font-semibold", tagOf(note.tag)?.chip)}>{tagOf(note.tag)?.label}</span>}
         <span className={cn("ml-auto shrink-0 text-[12.5px]", statusTone(note))}>
           {edit && note.overwrittenIn && !done ? `Overwritten in r${note.overwrittenIn}` : queued ? `Waiting for ${agentName ?? "the agent"}` : edit && note.status === "open" ? "Applied" : statusText[note.status]}
         </span>
@@ -168,9 +170,11 @@ function CueCard({
           />
         ) : (
           <div className="break-words whitespace-pre-wrap" onDoubleClick={() => note.status === "draft" && setEditing(true)}>
-            {note.text}
+            {note.text || <span className="text-dim">{note.tag ? tagOf(note.tag)?.sentence : unwritten(note) ? "Marker, not written yet" : ""}</span>}
           </div>
         )}
+        {note.target && <div className="mt-1 truncate text-[12px] text-soft">On {note.target.name}</div>}
+        {note.against !== undefined && <div className="mt-1 text-[12px] text-dim">Compared with r{note.against}</div>}
         {note.moved && <div className="mt-1 text-[12px] text-dim">Moved with its layer from {tc(note.t)}</div>}
         {note.anchorGone && <div className="mt-1 text-[12px] text-red">The layer this note was on is gone</div>}
         {note.annotatedFrame && (selected || note.status === "draft") && <MarkedFrame path={note.annotatedFrame} />}
@@ -249,50 +253,105 @@ export const Cues = forwardRef<
     onSeek: (ms: number) => void;
     now: number;
     range?: { in: number; out: number };
+    onDismissRange: () => void;
     tool?: Tool;
     onTool: (t?: Tool) => void;
     pending: Annotation[];
     onClearPending: () => void;
-    captureMarked: () => string | undefined;
+    captureMarked: (extra?: Annotation[]) => string | undefined;
+    target?: NoteTarget & { measuring?: boolean };
+    onClearTarget: () => void;
+    against?: number;
+    onNextUnwritten: (after?: string) => void;
+    onFixCheck: () => void;
     toast: (msg: string, tone?: "error") => void;
   }
->(function Cues({ cut, cues, selected, onSelect, onSeek, now, range, tool, onTool, pending, onClearPending, captureMarked, toast }, ref) {
+>(function Cues({ cut, cues, selected, onSelect, onSeek, now, range, onDismissRange, tool, onTool, pending, onClearPending, captureMarked, target, onClearTarget, against, onNextUnwritten, onFixCheck, toast }, ref) {
   const [text, setText] = useState("");
+  const [tag, setTag] = useState<NoteTag | null>();
   const [showDone, setShowDone] = useState(() => preferences().showResolved);
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
-  const drafts = cues.filter((n) => n.status === "draft");
   const done = cues.filter((n) => n.status === "resolved" || n.status === "wontfix");
   const visible = showDone ? cues : cues.filter((n) => !done.includes(n));
   const agentName = cut.collaborators.at(-1)?.agent ?? cut.agent?.name;
+  const bound = cues.find((n) => n.id === selected && unwritten(n));
   const at = range ? range.in : now;
-  const sendCount = drafts.length + (text.trim() || pending.length ? 1 : 0);
+  const shownTag = tag === null ? undefined : (tag ?? bound?.tag);
+  const hasContent = !!(text.trim() || pending.length || target || (bound ? tag !== undefined : tag));
+  const sendCount = cues.filter(sendable).length + (hasContent && (!bound || !sendable(bound)) ? 1 : 0);
+  const fixes = cues.filter((n) => n.status === "addressed" && n.kind === "note").length;
 
-  const add = async () => {
-    if (!text.trim() && !pending.length) return;
+  useEffect(() => {
+    setTag(undefined);
+    setText("");
+  }, [bound?.id]);
+
+  const reset = () => {
+    setText("");
+    setTag(undefined);
+    onClearPending();
+    onClearTarget();
+    onTool(undefined);
+  };
+
+  const commit = async () => {
+    if (!hasContent) return false;
     setBusy(true);
+    const targetBody = target ? { layerId: target.layerId, name: target.name, box: target.box } : undefined;
     try {
-      const marked = pending.length ? captureMarked() : undefined;
+      if (bound) {
+        await api(`/api/cuts/${cut.id}/notes/${bound.id}`, {
+          method: "PATCH",
+          body: {
+            text: text.trim(),
+            tag: shownTag ?? null,
+            annotations: [...bound.annotations, ...pending],
+            annotatedFrame: pending.length ? captureMarked(bound.annotations) : undefined,
+            target: targetBody,
+          },
+        });
+        reset();
+        onNextUnwritten(bound.id);
+        return true;
+      }
       const n = await api<Note>(`/api/cuts/${cut.id}/notes`, {
-        body: { t: Math.round(at), end: range ? Math.round(range.out) : undefined, rev: cut.rev, text: text.trim() || "See the marked frame", annotations: pending, annotatedFrame: marked },
+        body: {
+          t: Math.round(at),
+          end: range ? Math.round(range.out) : undefined,
+          rev: cut.rev,
+          text: text.trim() || (pending.length && !shownTag && !target ? "See the marked frame" : ""),
+          annotations: pending,
+          annotatedFrame: pending.length ? captureMarked() : undefined,
+          tag: shownTag,
+          target: targetBody,
+          against,
+        },
       });
-      setText("");
-      onClearPending();
-      onTool(undefined);
+      reset();
+      if (range) onDismissRange();
       onSelect(n.id);
+      return true;
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
+      return false;
     } finally {
       setBusy(false);
     }
   };
 
   const send = async () => {
-    if (text.trim() || pending.length) await add();
+    if (hasContent) await commit();
     try {
-      const r = await api<{ published: number; delivered: string[] }>(`/api/cuts/${cut.id}/publish`, { body: {} });
-      if (!r.published) return;
-      toast(r.delivered.length ? `Sent ${r.published} ${r.published === 1 ? "note" : "notes"} to ${agentName ?? "the agent"}` : `Sent ${r.published} ${r.published === 1 ? "note" : "notes"}. No agent thread is linked, so they wait in dailies_feedback`);
+      const r = await api<{ published: number; leftBehind?: number; delivered: string[] }>(`/api/cuts/${cut.id}/publish`, { body: {} });
+      const stay = r.leftBehind ?? 0;
+      const left = stay ? `. ${stay} unwritten ${stay === 1 ? "marker stays a draft" : "markers stay drafts"}` : "";
+      if (!r.published) {
+        if (stay) toast(`Nothing to send yet. Write or tag your ${stay === 1 ? "marker" : "markers"} first`);
+        return;
+      }
+      const notes = `${r.published} ${r.published === 1 ? "note" : "notes"}`;
+      toast(r.delivered.length ? `Sent ${notes} to ${agentName ?? "the agent"}${left}` : `Sent ${notes}. No agent thread is linked, so they wait in slate_feedback${left}`);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     }
@@ -305,15 +364,24 @@ export const Cues = forwardRef<
     { t: "arrow", label: "Arrow", keys: "A", icon: <ArrowUpRight /> },
     { t: "pen", label: "Draw", keys: "D", icon: <PenLine /> },
     { t: "pin", label: "Pin", keys: "P", icon: <MapPin /> },
+    { t: "target", label: "Pick the layer", keys: "T", icon: <Crosshair /> },
   ];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {fixes > 0 && (
+          <button className="mx-1 mt-2 mb-1 grid w-[calc(100%-8px)] rounded-xl bg-teal/10 px-3 py-2.5 text-left hover:bg-teal/15" onClick={onFixCheck}>
+            <span className="font-semibold text-teal">
+              Check {fixes} {fixes === 1 ? "fix" : "fixes"}
+            </span>
+            <span className="text-[12.5px] text-soft">Marked addressed. Watch each one and say if it looks good.</span>
+          </button>
+        )}
         {visible.length === 0 && (
           <div className="px-4 pt-8 text-soft">
             <div className="font-semibold text-text">Nothing noted yet</div>
-            <p className="mt-1">Pause where something is off, write what to change, and draw on the frame if it helps. Notes stay drafts until you send them.</p>
+            <p className="mt-1">Press M while it plays to drop a marker, or pause and write what to change. Notes stay drafts until you send them.</p>
           </div>
         )}
         {visible.map((n) => (
@@ -326,9 +394,25 @@ export const Cues = forwardRef<
         )}
       </div>
       <div className="grid grid-cols-[minmax(0,1fr)] gap-2.5 px-4 pt-3 pb-4">
-        <div className="rounded-xl bg-ink px-3 pt-2.5 pb-2 focus-within:shadow-[inset_0_0_0_1px_var(--color-line)]">
-          <div className="flex items-baseline gap-2 text-[12.5px]">
-            <span className="font-semibold text-amber">{range ? `${tc(range.in)} to ${tc(range.out)}` : tc(now)}</span>
+        <div className={cn("rounded-xl bg-ink px-3 pt-2.5 pb-2 focus-within:shadow-[inset_0_0_0_1px_var(--color-line)]", bound && "shadow-[inset_0_0_0_1px_var(--color-amber)] focus-within:shadow-[inset_0_0_0_1px_var(--color-amber)]")}>
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 text-[12.5px]">
+            <span className="font-semibold text-amber">{bound ? `Marker ${cues.indexOf(bound) + 1} at ${tc(bound.displayT)}` : range ? `${tc(range.in)} to ${tc(range.out)}` : tc(now)}</span>
+            {range && !bound && (
+              <button aria-label="Note the frame instead of the range" className="grid size-4 place-items-center self-center rounded text-dim hover:text-text" onClick={onDismissRange}>
+                <X className="size-3" />
+              </button>
+            )}
+            {target && (
+              <span className="flex min-w-0 items-center gap-1 text-soft">
+                <span className="truncate">
+                  On {target.name}
+                  {target.measuring && <span className="text-dim">, finding it</span>}
+                </span>
+                <button aria-label="Clear the layer" className="grid size-4 shrink-0 place-items-center rounded text-dim hover:text-text" onClick={onClearTarget}>
+                  <X className="size-3" />
+                </button>
+              </span>
+            )}
             {pending.length > 0 && (
               <span className="flex items-center gap-1 text-soft">
                 {pending.length} {pending.length === 1 ? "mark" : "marks"}
@@ -337,6 +421,7 @@ export const Cues = forwardRef<
                 </button>
               </span>
             )}
+            {against !== undefined && !bound && <span className="text-dim">against r{against}</span>}
           </div>
           <textarea
             ref={input}
@@ -348,13 +433,28 @@ export const Cues = forwardRef<
                 void send();
               } else if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                void add();
+                void commit();
+              } else if (e.key === "Tab" && !e.shiftKey && !text.trim()) {
+                e.preventDefault();
+                onNextUnwritten(bound?.id);
               } else if (e.key === "Escape") input.current?.blur();
             }}
-            placeholder={range ? "Note this range" : "Note this frame"}
+            placeholder={bound ? "What's wrong here? Enter saves and moves on" : range ? "Note this range" : "Note this frame"}
             rows={2}
             className="mt-1 w-full resize-none bg-transparent outline-none placeholder:text-faint"
           />
+          <div className="flex flex-wrap gap-1 pb-0.5">
+            {TAGS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTag(shownTag === t.id ? null : t.id)}
+                className={cn("flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[12px] font-semibold", shownTag === t.id ? t.chip : "text-dim hover:bg-hover hover:text-soft")}
+              >
+                {t.label}
+                <span className="text-[11px] font-normal text-faint">{t.key}</span>
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex items-center gap-1">
           {tools.map((x) => (
@@ -363,8 +463,8 @@ export const Cues = forwardRef<
             </IconButton>
           ))}
           <div className="flex-1" />
-          <Button variant="quiet" disabled={busy || (!text.trim() && !pending.length)} onClick={() => void add()}>
-            Add
+          <Button variant="quiet" disabled={busy || !hasContent} onClick={() => void commit()}>
+            {bound ? "Save" : "Add"}
           </Button>
           <Button
             variant="primary"

@@ -6,7 +6,7 @@ import { connectPrompt, invitePrompt } from "@/lib/setup-prompt";
 import { ago, cn } from "@/lib/format";
 import { Button, IconButton } from "./ui/button";
 
-export const CHECK_CLIENT = "dailies-check";
+export const CHECK_CLIENT = "slate-check";
 
 let shown = false;
 const watchers = new Set<() => void>();
@@ -311,7 +311,7 @@ function Setup({ open, onClose }: { open: boolean; onClose: () => void }) {
       <Step n={4} state={states[3]} title={cuts > 0 ? "Your cuts are coming in" : "First cut"} detail={cuts > 0 ? undefined : "Your agent opens its first video here."} />
 
       <footer className="flex items-center justify-between px-6 pt-4">
-        <Button variant="ghost" title="A prompt for someone else's Windows PC. They need read access to the Dailies repo." onClick={() => void copy("invite", invitePrompt(s))}>
+        <Button variant="ghost" title="A prompt for someone else's Windows PC. They need read access to the Slate repo." onClick={() => void copy("invite", invitePrompt(s))}>
           {copied === "invite" ? <Check className="size-4" strokeWidth={2.6} /> : <UserPlus className="size-4" />}
           {copied === "invite" ? "Invite prompt copied" : "Invite someone else"}
         </Button>
@@ -339,7 +339,7 @@ function Shell({ open, onClose, onEscape, meta, children }: { open: boolean; onC
           className="no-drag fixed top-[max(24px,calc(50vh-250px))] left-1/2 z-50 max-h-[calc(100vh-48px)] w-[min(600px,calc(100vw-48px))] -translate-x-1/2 overflow-y-auto rounded-[18px] bg-panel pt-6 pb-[18px] shadow-[0_30px_90px_rgba(0,0,0,.6)] outline-none"
         >
           <header className="flex items-center gap-3 pr-4 pb-3 pl-6">
-            <D.Title className="flex-1 text-[19px] font-semibold">Set up Dailies</D.Title>
+            <D.Title className="flex-1 text-[19px] font-semibold">Set up Slate</D.Title>
             {meta && <span className="text-[12.5px] text-dim">{meta}</span>}
             <D.Close asChild>
               <IconButton label="Close" side="left" className="size-7 [&_svg]:size-4">

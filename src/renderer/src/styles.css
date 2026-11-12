@@ -3,6 +3,7 @@
 
 @theme {
   --font-sans: "Familjen Grotesk Variable", "Segoe UI", sans-serif;
+  --shadow-pop: 0 14px 44px rgb(0 0 0 / 0.5);
   --color-ink: #0f1b1d;
   --color-well: #0b1517;
   --color-panel: #132225;

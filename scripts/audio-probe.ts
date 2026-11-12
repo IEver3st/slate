@@ -12,7 +12,7 @@ async function go(name: string, resolution: string, fps: number, startMs: number
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const t0 = Date.now();
-  const ex = exportSpan({ cli, project, output: join(dir, "span.mp4"), resolution, fps, startMs, durationMs, shim: SHIM, env: { DAILIES_JOB: dir, DAILIES_ENCODER: encoder, DAILIES_GOP: String(fps), DAILIES_FFMPEG: FFMPEG } });
+  const ex = exportSpan({ cli, project, output: join(dir, "span.mp4"), resolution, fps, startMs, durationMs, shim: SHIM, env: { SLATE_JOB: dir, SLATE_ENCODER: encoder, SLATE_GOP: String(fps), SLATE_FFMPEG: FFMPEG } });
   await ex.done;
   const wav = join(dir, "audio.wav");
   return { ms: Date.now() - t0, wav: existsSync(wav) ? readFileSync(wav) : undefined };

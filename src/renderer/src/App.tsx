@@ -17,15 +17,15 @@ export function App() {
     connection()
       .then(() => setReady(true))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-    void window.dailies?.takeNavigation().then((id) => id && setTarget({ cutId: id }));
-    return window.dailies?.onNavigate((id) => setTarget({ cutId: id }));
+    void window.slate?.takeNavigation().then((id) => id && setTarget({ cutId: id }));
+    return window.slate?.onNavigate((id) => setTarget({ cutId: id }));
   }, []);
 
   if (error) {
     return (
       <div className="grid h-full place-items-center p-10">
         <div className="max-w-md">
-          <div className="text-[17px] font-semibold">Dailies could not reach its render service</div>
+          <div className="text-[17px] font-semibold">Slate could not reach its render service</div>
           <p className="mt-2 text-soft">{error}</p>
         </div>
       </div>

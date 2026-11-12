@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff, Minus, Plus } from "lucide-react";
+import { Crosshair, Eye, EyeOff, Minus, Plus } from "lucide-react";
 import type { ContextLayer, CutDetail, TrackItem } from "@/lib/api";
 import { api } from "@/lib/api";
 import { cn, dbOf, tc } from "@/lib/format";
@@ -114,7 +114,7 @@ function TimingField({ item, onEdit }: { item: TrackItem; onEdit: (e: EditReques
   );
 }
 
-export function Inspector({ cut, time, paused, selected, onEdit }: { cut: CutDetail; time: number; paused: boolean; selected?: TrackItem; onEdit: (e: EditRequest) => void }) {
+export function Inspector({ cut, time, paused, selected, onEdit, onNoteLayer }: { cut: CutDetail; time: number; paused: boolean; selected?: TrackItem; onEdit: (e: EditRequest) => void; onNoteLayer: (l: ContextLayer) => void }) {
   const [layers, setLayers] = useState<ContextLayer[]>([]);
   const [at, setAt] = useState<number>();
   const rounded = Math.round(time / FRAME);
@@ -164,6 +164,11 @@ export function Inspector({ cut, time, paused, selected, onEdit }: { cut: CutDet
                   {l.sourceMs !== undefined ? `, source ${tc(l.sourceMs)}` : ""}
                 </div>
               </div>
+              {l.type !== "Audio" && !l.hidden && (
+                <IconButton label="Note this layer" onClick={() => onNoteLayer(l)}>
+                  <Crosshair />
+                </IconButton>
+              )}
               <IconButton label={l.hiddenBy ? `Show group ${l.hiddenBy.name}` : l.hidden ? "Show layer" : "Hide layer"} onClick={() => onEdit({ kind: "hide", layerId: l.hiddenBy?.id ?? l.id, hidden: !l.hidden })}>
                 {l.hidden ? <EyeOff /> : <Eye />}
               </IconButton>

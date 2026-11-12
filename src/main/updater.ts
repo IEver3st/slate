@@ -106,7 +106,7 @@ export function createUpdater(o: Options) {
     }
     if (announced.has(ready.dir) || !Notification.isSupported()) return;
     announced.add(ready.dir);
-    const n = new Notification({ title: `Dailies ${ready.short} is ready`, body: `${ready.subject}\nClick to restart into it.`, icon: o.icon, silent: true });
+    const n = new Notification({ title: `Slate ${ready.short} is ready`, body: `${ready.subject}\nClick to restart into it.`, icon: o.icon, silent: true });
     n.on("click", () => apply());
     n.show();
   }
@@ -118,7 +118,7 @@ export function createUpdater(o: Options) {
     if (!fresh || !Notification.isSupported() || announced.has(`fail:${short}`)) return;
     announced.add(`fail:${short}`);
     new Notification({
-      title: `Dailies ${short} did not build`,
+      title: `Slate ${short} did not build`,
       body: `Still running ${running?.short}. Failed at ${r.step}. See ${logFile}.`,
       icon: o.icon,
       silent: true,

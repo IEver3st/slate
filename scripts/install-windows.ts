@@ -1,7 +1,8 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import * as ResEdit from "resedit";
-import { readCurrent, update } from "./release";
+import { appHome, shellDir, slateHome } from "../src/home";
+import { legacyStillRunning, moveAgentConfigs, moveHome, moveLoginItem, removeLegacyShell, renamedCode, repointReleases } from "./migrate";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(name);
@@ -12,10 +13,10 @@ const option = (name: string) => {
 
 const SOURCE = resolve(option("--from-release") ?? join(import.meta.dir, ".."));
 const DIST = join(SOURCE, "node_modules", "electron", "dist");
-const TARGET = join(process.env.LOCALAPPDATA!, "Programs", "Dailies");
+const TARGET = shellDir();
 const STAGE = `${TARGET}.staging`;
 const OLD = `${TARGET}.old`;
-const MARKER = "dailies-install.json";
+const MARKER = "slate-install.json";
 const pkg = JSON.parse(readFileSync(join(SOURCE, "package.json"), "utf8"));
 
 const LOADER = `import { app, dialog } from "electron";
@@ -23,7 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const releases = join(process.env.LOCALAPPDATA, "Dailies", "releases");
+const releases = join(process.env.LOCALAPPDATA, "Slate", "releases");
 const read = (file) => {
   try {
     return JSON.parse(readFileSync(file, "utf8"));
@@ -31,14 +32,14 @@ const read = (file) => {
     return undefined;
   }
 };
-const usable = (dir) => dir && existsSync(join(dir, "out", "main", "index.js"));
+const usable = (dir) => dir && existsSync(join(dir, "out", "main", "index.js")) && read(join(dir, "package.json"))?.name === "slate";
 const current = read(join(releases, "current.json"));
 const dir = [current?.dir, current?.previous].find(usable);
 if (dir) {
   await import(pathToFileURL(join(dir, "out", "main", "index.js")).href);
 } else {
   await app.whenReady();
-  dialog.showErrorBox("Dailies", "No production build of Dailies was found in " + releases + ". Run \\"bun run deploy\\" in the Dailies repo.");
+  dialog.showErrorBox("Slate", "No production build of Slate was found in " + releases + ". Run \\"bun run deploy\\" in the Slate repo.");
   app.exit(1);
 }
 `;
@@ -65,10 +66,10 @@ function brandExecutable(source: string, dest: string) {
   const version = `${pkg.version}.0`;
   for (const lang of info.getAllLanguagesForStringValues()) {
     info.setStringValues(lang, {
-      ProductName: "Dailies",
-      FileDescription: "Dailies",
-      InternalName: "Dailies",
-      OriginalFilename: "Dailies.exe",
+      ProductName: "Slate",
+      FileDescription: "Slate",
+      InternalName: "Slate",
+      OriginalFilename: "Slate.exe",
       CompanyName: "Ever3st",
       LegalCopyright: "",
       FileVersion: version,
@@ -111,7 +112,7 @@ async function swapInto(target: string, patience: number) {
       if (existsSync(OLD) && !existsSync(target)) renameSync(OLD, target);
       if (Date.now() > until) {
         rmSync(STAGE, { recursive: true, force: true });
-        fail("Dailies is running from the installed copy. Quit it from the tray (Quit Dailies) and run this again.");
+        fail(`Could not replace ${target}: Slate may be running from it, or a virus scan still holds a file. Quit Slate from the tray and run this again; it finishes what is left.`);
       }
       await Bun.sleep(500);
     }
@@ -127,10 +128,10 @@ function installShell() {
     recursive: true,
     filter: (src) => !["electron.exe", "default_app.asar"].includes(basename(src).toLowerCase()),
   });
-  brandExecutable(join(DIST, "electron.exe"), join(STAGE, "Dailies.exe"));
+  brandExecutable(join(DIST, "electron.exe"), join(STAGE, "Slate.exe"));
   const app = join(STAGE, "resources", "app");
   mkdirSync(app, { recursive: true });
-  writeFileSync(join(app, "package.json"), JSON.stringify({ name: "dailies", productName: "Dailies", version: pkg.version, type: "module", main: "main.js" }, null, 2));
+  writeFileSync(join(app, "package.json"), JSON.stringify({ name: "slate", productName: "Slate", version: pkg.version, type: "module", main: "main.js" }, null, 2));
   writeFileSync(join(app, "main.js"), LOADER);
   writeFileSync(join(STAGE, MARKER), JSON.stringify({ electron: electronVersion, version: pkg.version, installedFrom: SOURCE, installedAt: new Date().toISOString() }, null, 2));
   return electronVersion;
@@ -138,30 +139,52 @@ function installShell() {
 
 if (process.platform !== "win32") fail("This installer is for Windows.");
 
+process.chdir(process.env.LOCALAPPDATA!);
+const step = (line: string) => console.log(line);
 const waitPid = Number(option("--wait-pid") ?? 0);
+const abort = (message: string): never => {
+  rmSync(STAGE, { recursive: true, force: true });
+  fail(message);
+};
+if (!waitPid && (await legacyStillRunning())) fail("Dailies is still running. Quit it from the tray (Quit Dailies) and run this again. Nothing was changed.");
 const electronVersion = installShell();
 if (waitPid) await waitFor(waitPid);
-await swapInto(TARGET, waitPid ? 30_000 : 0);
 
-if (!flag("--from-release") && (!readCurrent() || flag("--update"))) {
+const alreadyMoved = existsSync(slateHome());
+if (alreadyMoved) repointReleases();
+const untouched = alreadyMoved ? "" : " Nothing was moved.";
+const { readCurrent, update } = await import("./release");
+if (!flag("--from-release") && (!renamedCode(readCurrent()?.dir) || flag("--update"))) {
   console.log("Building the production release from GitHub main...");
   const result = update();
-  if (result.status === "failed") fail(`Installed the app shell, but building the production release failed at ${result.step}:\n${result.error}`);
+  if (result.status === "failed") abort(`Building the production release failed at ${result.step}.${untouched}\n${result.error}`);
 }
+if (!flag("--from-release") && !renamedCode(readCurrent()?.dir)) abort(`GitHub main does not have the Slate code yet. Push main and run this again.${untouched}`);
+try {
+  await moveHome(step);
+} catch (e) {
+  abort(e instanceof Error ? e.message : String(e));
+}
+await swapInto(TARGET, waitPid ? 30_000 : 10_000);
 
-const exe = join(TARGET, "Dailies.exe");
+const exe = join(TARGET, "Slate.exe");
 const env = { ...process.env, ELECTRON_RUN_AS_NODE: undefined };
 const register = Bun.spawnSync([exe, "--register"], { stdout: "pipe", stderr: "pipe", env });
-if (register.exitCode !== 0) fail(`Installed, but registering the Start menu shortcut failed: ${register.stderr.toString().trim()}`);
+if (register.exitCode !== 0) fail(`Installed, but registering the Start menu shortcut failed: ${register.stderr.toString().trim()}. Run this again to finish.`);
 
-const current = readCurrent();
-console.log(`Installed Dailies (Electron ${electronVersion}) to ${exe}`);
+moveLoginItem(exe, step);
+removeLegacyShell(step);
+await moveAgentConfigs(step);
+
+const currentFile = join(appHome(), "releases", "current.json");
+const current = existsSync(currentFile) ? JSON.parse(readFileSync(currentFile, "utf8")) : undefined;
+console.log(`Installed Slate (Electron ${electronVersion}) to ${exe}`);
 if (current) console.log(`Production release: ${current.short} ${current.subject}`);
 if (flag("--launch")) {
   const commandLine = `"${exe}"${flag("--background") ? " --background" : ""}`;
   const ps = `$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${commandLine.replace(/'/g, "''")}'; CurrentDirectory = '${TARGET.replace(/'/g, "''")}' }; $r.ReturnValue`;
   const launched = Bun.spawnSync(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { stdout: "pipe", stderr: "pipe", windowsHide: true });
-  if (launched.stdout.toString().trim() !== "0") fail(`Installed, but launching Dailies failed: ${launched.stderr.toString().trim()}`);
+  if (launched.stdout.toString().trim() !== "0") fail(`Installed, but launching Slate failed: ${launched.stderr.toString().trim()}`);
 } else {
-  console.log("Start menu: Dailies. Quit any running Dailies and open it from there to get the Dailies icon in the taskbar.");
+  console.log("Start menu: Slate. Quit any running Slate and open it from there to get the Slate icon in the taskbar.");
 }

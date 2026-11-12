@@ -1,4 +1,4 @@
-export type DailiesEvent =
+export type SlateEvent =
   | { type: "cuts" }
   | { type: "cut"; cutId: string }
   | { type: "revision"; cutId: string; n: number }
@@ -7,6 +7,8 @@ export type DailiesEvent =
   | { type: "notes"; cutId: string; noteId?: string }
   | { type: "activity"; cutId: string }
   | { type: "mix"; cutId: string; rev: number }
+  | { type: "diff"; cutId: string }
+  | { type: "checks"; cutId: string }
   | { type: "export"; cutId: string; cut: string; rev: number; state: "queued" | "running" | "done" | "failed" | "cancelled"; progress: number; phase: string; file?: string; bytes?: number; error?: string }
   | { type: "focus"; cutId: string; t?: number; noteId?: string }
   | { type: "agent"; cutId: string; cut: string; name: string; state: string; text: string }
@@ -14,10 +16,10 @@ export type DailiesEvent =
   | { type: "service" }
   | { type: "setup" };
 
-type Listener = (e: DailiesEvent) => void;
+type Listener = (e: SlateEvent) => void;
 const listeners = new Set<Listener>();
 
-export function emit(e: DailiesEvent) {
+export function emit(e: SlateEvent) {
   for (const l of listeners) {
     try {
       l(e);

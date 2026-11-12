@@ -127,7 +127,7 @@ export class Exporter {
     cut.pinned.add(rev);
     this.failures.delete(cut.id);
     this.queue.push(job);
-    console.log(`[dailies] export ${cut.name} r${rev} queued (${job.id})`);
+    console.log(`[slate] export ${cut.name} r${rev} queued (${job.id})`);
     this.changed(job, "queued");
     void this.pump();
     return job.id;
@@ -138,7 +138,7 @@ export class Exporter {
     if (queued) {
       this.queue = this.queue.filter((j) => j !== queued);
       cut.pinned.delete(queued.rev);
-      console.log(`[dailies] export ${cut.name} r${queued.rev} cancelled before it started`);
+      console.log(`[slate] export ${cut.name} r${queued.rev} cancelled before it started`);
       this.changed(queued, "cancelled");
       return true;
     }
@@ -255,7 +255,7 @@ export class Exporter {
     job.startedAt = Date.now();
     const encoder = await pickEncoder();
     const dir = join(JOB_DIR, `export-${job.id}`);
-    console.log(`[dailies] export ${cut.name} r${job.rev} from ${source.path}${source.live ? " (live file)" : ""} to ${file} with ${encoder}`);
+    console.log(`[slate] export ${cut.name} r${job.rev} from ${source.path}${source.live ? " (live file)" : ""} to ${file} with ${encoder}`);
     this.changed(job, "running");
     let lastEmit = 0;
     try {
@@ -271,7 +271,7 @@ export class Exporter {
         startMs: 0,
         durationMs: rev.durationMs,
         shim: SHIM,
-        env: { DAILIES_EXPORT: "1", DAILIES_JOB: dir, DAILIES_ENCODER: encoder, DAILIES_FFMPEG: FFMPEG },
+        env: { SLATE_EXPORT: "1", SLATE_JOB: dir, SLATE_ENCODER: encoder, SLATE_FFMPEG: FFMPEG },
         onProgress: (p) => {
           if (p.total) job.total = p.total;
           if (p.completed !== undefined) job.completed = p.completed;
@@ -300,7 +300,7 @@ export class Exporter {
       const ms = Date.now() - job.startedAt;
       this.record(cut, { id: job.id, rev: job.rev, file: placed, at: nowIso(), bytes, ms, encoder, width: probe?.width, height: probe?.height });
       cut.log({ author: job.author, kind: "export", rev: job.rev, text: `Exported r${job.rev} in ${EXPORT_PROFILE.label}, ${(bytes / 1e6).toFixed(0)} MB` });
-      console.log(`[dailies] exported ${cut.name} r${job.rev} to ${placed} (${(bytes / 1e6).toFixed(1)} MB, ${probe?.width}x${probe?.height}) in ${ms} ms`);
+      console.log(`[slate] exported ${cut.name} r${job.rev} to ${placed} (${(bytes / 1e6).toFixed(1)} MB, ${probe?.width}x${probe?.height}) in ${ms} ms`);
       job.completed = job.total || 1;
       this.changed(job, "done", { file: placed, bytes });
       rmSync(dir, { recursive: true, force: true });
@@ -308,7 +308,7 @@ export class Exporter {
       const msg = job.cancelled ? "cancelled" : e instanceof Error ? e.message : String(e);
       await this.clean(folder, job.id);
       if (job.cancelled) {
-        console.log(`[dailies] export ${cut.name} r${job.rev} cancelled`);
+        console.log(`[slate] export ${cut.name} r${job.rev} cancelled`);
         this.changed(job, "cancelled");
         rmSync(dir, { recursive: true, force: true });
       } else this.fail(job, msg);
@@ -318,7 +318,7 @@ export class Exporter {
   private fail(job: Job, raw: string) {
     const error = tail(raw);
     this.failures.set(job.cut.id, { rev: job.rev, error, at: nowIso() });
-    console.error(`[dailies] export ${job.cut.name} r${job.rev} failed: ${raw}`);
+    console.error(`[slate] export ${job.cut.name} r${job.rev} failed: ${raw}`);
     job.cut.log({ author: job.author, kind: "export", rev: job.rev, text: `Couldn't export r${job.rev}: ${error}` });
     this.changed(job, "failed", { error });
   }

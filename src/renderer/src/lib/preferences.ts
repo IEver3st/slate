@@ -1,9 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { cleanPreferences, DEFAULT_PREFERENCES, type Preferences, type SettingsSnapshot } from "../../../shared/preferences";
 
-const LOCAL_KEY = "dailies-preferences";
+const LOCAL_KEY = "slate-preferences";
 
-const bridge = window.dailies;
+const bridge = window.slate;
 
 let snap: SettingsSnapshot = {
   preferences: cleanPreferences({ ...readLocal(), ...(bridge?.initialTheme ? { theme: bridge.initialTheme } : {}) }),

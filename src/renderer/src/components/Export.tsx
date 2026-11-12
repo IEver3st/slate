@@ -132,7 +132,7 @@ export function ExportControl({ cut, viewing, toast }: { cut: CutDetail; viewing
     }
   };
   const reveal = (file: string) => {
-    if (window.dailies) void window.dailies.reveal(file);
+    if (window.slate) void window.slate.reveal(file);
     else void navigator.clipboard.writeText(file).then(() => toast("Copied the file path"));
   };
 

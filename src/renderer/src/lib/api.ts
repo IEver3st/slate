@@ -1,5 +1,7 @@
 export type Author = { kind: "you" | "agent" | "unknown"; name: string };
 export type NoteStatus = "draft" | "open" | "claimed" | "addressed" | "resolved" | "wontfix";
+export type NoteTag = "timing" | "text" | "audio" | "framing" | "remove";
+export type NoteTarget = { layerId: number; name: string; box?: { x: number; y: number; w: number; h: number } };
 export type Annotation =
   | { kind: "rect"; x: number; y: number; w: number; h: number }
   | { kind: "arrow"; x1: number; y1: number; x2: number; y2: number }
@@ -27,6 +29,9 @@ export type Note = {
   publishedAt?: string;
   annotations: Annotation[];
   context: ContextLayer[];
+  tag?: NoteTag;
+  target?: NoteTarget;
+  against?: number;
   frame?: string;
   annotatedFrame?: string;
   suggestion?: Suggestion;
@@ -90,6 +95,7 @@ export type CutSummary = {
   draftNotes: number;
   agent?: AgentPresence;
   approvedRev?: number;
+  seenRev?: number;
   render: { ready: number; total: number; rendering: boolean; failed: number };
   missing?: boolean;
 };
@@ -127,9 +133,14 @@ export type CutDetail = CutSummary & {
   activity: Activity[];
   collaborators: Collaborator[];
 };
+export type Verdict = "same" | "changed" | "maybe" | "only";
+export type PairDiff = { old: number; new: number; a: number; b: number; seconds: { s: number; picture: Verdict; sound: Verdict }[]; changes: (LayerChange & { startMs?: number; endMs?: number })[]; pending: number };
+export type Finding = { level: "error" | "warning" | "allowed"; rule: string; message: string; atMs?: number; source: "cutlint" | "sound" };
+export type Checks = { lint: "ready" | "running" | "missing" | "failed"; sound: "ready" | "waiting"; findings: Finding[] };
+export type Peaks = { binMs: number; seconds: (number[] | null)[] };
 export type LibraryFile = { path: string; name: string; folder: string; size: number; mtimeMs: number; registered?: boolean; id?: string; durationMs?: number; width?: number; height?: number; group?: string; poster?: boolean };
 export type ActivityItem = Activity & { cutId: string; cut: string };
-export type DailiesEvent = { type: string; cutId?: string; [k: string]: unknown };
+export type SlateEvent = { type: string; cutId?: string; [k: string]: unknown };
 export type AgentClient = { id: string; name: string; version?: string; t3?: boolean; firstAt: string; lastAt: string };
 export type SetupState = {
   owner?: string;
@@ -151,13 +162,13 @@ let known: { base: string; token: string } | undefined;
 
 export function connection() {
   conn ??= (async () => {
-    if (window.dailies) {
-      const c = await window.dailies.connection();
+    if (window.slate) {
+      const c = await window.slate.connection();
       return { base: location.origin, token: c.token };
     }
     const u = new URL(location.href);
-    const token = u.searchParams.get("token") ?? localStorage.getItem("dailies-token") ?? "";
-    if (token) localStorage.setItem("dailies-token", token);
+    const token = u.searchParams.get("token") ?? localStorage.getItem("slate-token") ?? "";
+    if (token) localStorage.setItem("slate-token", token);
     return { base: location.origin, token };
   })().then((c) => (known = c));
   return conn;
@@ -171,18 +182,18 @@ export function media(path: string) {
 export class ApiError extends Error {}
 
 function reconnect() {
-  if (window.dailies) conn = undefined;
+  if (window.slate) conn = undefined;
 }
 
 export async function api<T = any>(path: string, init?: { method?: string; body?: unknown; signal?: AbortSignal }, retry = true): Promise<T> {
   const { base, token } = await connection();
   const r = await fetch(base + path, {
     method: init?.method ?? (init?.body ? "POST" : "GET"),
-    headers: { "x-dailies-token": token, ...(init?.body ? { "content-type": "application/json" } : {}) },
+    headers: { "x-slate-token": token, ...(init?.body ? { "content-type": "application/json" } : {}) },
     body: init?.body ? JSON.stringify(init.body) : undefined,
     signal: init?.signal,
   });
-  if (r.status === 401 && retry && window.dailies) {
+  if (r.status === 401 && retry && window.slate) {
     reconnect();
     return api<T>(path, init, false);
   }
@@ -197,7 +208,7 @@ export async function mediaUrl(path: string) {
   return `${base}${path}${path.includes("?") ? "&" : "?"}token=${token}`;
 }
 
-type Listener = (e: DailiesEvent) => void;
+type Listener = (e: SlateEvent) => void;
 const listeners = new Set<Listener>();
 let source: EventSource | undefined;
 
@@ -212,7 +223,7 @@ async function openStream() {
   if (source) return;
   source = new EventSource(`${base}/api/events?token=${token}`);
   source.onmessage = (m) => {
-    const e = JSON.parse(m.data) as DailiesEvent;
+    const e = JSON.parse(m.data) as SlateEvent;
     for (const l of listeners) l(e);
   };
   source.onerror = () => {

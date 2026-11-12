@@ -2,7 +2,8 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { Annotation } from "@/lib/api";
 import { activeAccent } from "@/lib/theme";
 
-export type Tool = "rect" | "arrow" | "pen" | "pin";
+export type Tool = "rect" | "arrow" | "pen" | "pin" | "target";
+export type Box = { x: number; y: number; w: number; h: number };
 
 function Shape({ a, w, h, color = "var(--color-amber)", faded }: { a: Annotation; w: number; h: number; color?: string; faded?: boolean }) {
   const sw = 3;
@@ -35,7 +36,7 @@ function Shape({ a, w, h, color = "var(--color-amber)", faded }: { a: Annotation
   );
 }
 
-export function Sketch({ tool, pending, shown, onAdd }: { tool?: Tool; pending: Annotation[]; shown: Annotation[]; onAdd: (a: Annotation) => void }) {
+export function Sketch({ tool, pending, shown, onAdd, onPick, targetBox }: { tool?: Tool; pending: Annotation[]; shown: Annotation[]; onAdd: (a: Annotation) => void; onPick?: (at: { clientX: number; clientY: number }) => void; targetBox?: Box }) {
   const ref = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [draft, setDraft] = useState<Annotation>();
@@ -61,6 +62,10 @@ export function Sketch({ tool, pending, shown, onAdd }: { tool?: Tool; pending: 
     if (!tool) return;
     e.preventDefault();
     e.stopPropagation();
+    if (tool === "target") {
+      onPick?.({ clientX: e.clientX, clientY: e.clientY });
+      return;
+    }
     const [x0, y0] = norm(e);
     if (tool === "pin") {
       onAdd({ kind: "pin", x: x0, y: y0 });
@@ -95,6 +100,19 @@ export function Sketch({ tool, pending, shown, onAdd }: { tool?: Tool; pending: 
         <Shape key={`p${i}`} a={a} w={size.w} h={size.h} />
       ))}
       {draft && <Shape a={draft} w={size.w} h={size.h} />}
+      {targetBox && (
+        <rect
+          x={targetBox.x * size.w - 3}
+          y={targetBox.y * size.h - 3}
+          width={targetBox.w * size.w + 6}
+          height={targetBox.h * size.h + 6}
+          rx={4}
+          fill="none"
+          stroke="var(--color-teal)"
+          strokeWidth={2}
+          strokeDasharray="6 4"
+        />
+      )}
     </svg>
   );
 }

@@ -1,9 +1,9 @@
 import { useSyncExternalStore } from "react";
 import { FPS, frameAt } from "./format";
 
-export type PlayerState = { time: number; playing: boolean; rate: number; muted: boolean; volume: number; loop?: { in: number; out: number }; durationMs: number };
+export type PlayerState = { time: number; playing: boolean; rate: number; muted: boolean; volume: number; loop?: { in: number; out: number }; durationMs: number; hearCompare: boolean };
 
-const AUDIO_KEY = "dailies-audio";
+const AUDIO_KEY = "slate-audio";
 
 function savedAudio(): { volume: number; muted: boolean } {
   try {
@@ -16,7 +16,7 @@ function savedAudio(): { volume: number; muted: boolean } {
 
 export class PlayerController {
   video?: HTMLVideoElement;
-  state: PlayerState = { time: 0, playing: false, rate: 1, durationMs: 0, ...savedAudio() };
+  state: PlayerState = { time: 0, playing: false, rate: 1, durationMs: 0, hearCompare: false, ...savedAudio() };
   private subs = new Set<() => void>();
   private cbId?: number;
   private shuttle = 0;
@@ -43,7 +43,9 @@ export class PlayerController {
     this.cmpCb = undefined;
     this.cmpFrame = undefined;
     this.cmpAhead = 0;
+    if (this.video) this.applyAudio(this.video);
     if (!c) return;
+    this.applyAudio(c);
     const tick = (now: number, meta: VideoFrameCallbackMetadata) => {
       if (this.cmp !== c) return;
       this.cmpFrame = { now, media: meta.mediaTime };
@@ -124,6 +126,11 @@ export class PlayerController {
     const f = this.cmpFrame;
     if (v.paused || c.paused || now === undefined || media === undefined || !f) return;
     const sample = f.media + ((now - f.now) / 1000) * c.playbackRate - media;
+    if (this.state.hearCompare) {
+      if (Math.abs(sample) > 0.15) realign();
+      else if (c.playbackRate !== v.playbackRate) c.playbackRate = v.playbackRate;
+      return;
+    }
     if (Math.abs(sample) > 0.25) return realign();
     this.cmpAhead += (sample - this.cmpAhead) * 0.15;
     const ahead = this.cmpAhead;
@@ -171,12 +178,20 @@ export class PlayerController {
     if (this.video) this.video.playbackRate = rate;
   }
   applyAudio(v: HTMLVideoElement) {
+    const isCompare = v === this.cmp;
+    const audible = this.state.hearCompare && !!this.cmp ? isCompare : !isCompare;
     v.volume = this.state.volume ** 2;
-    v.muted = this.state.muted || this.state.volume === 0;
+    v.muted = !audible || this.state.muted || this.state.volume === 0;
+  }
+  setHearCompare(on: boolean) {
+    this.set({ hearCompare: on });
+    if (this.video) this.applyAudio(this.video);
+    if (this.cmp) this.applyAudio(this.cmp);
   }
   private setAudio(volume: number, muted: boolean) {
     this.set({ volume: Math.round(Math.max(0, Math.min(1, volume)) * 100) / 100, muted });
     if (this.video) this.applyAudio(this.video);
+    if (this.cmp) this.applyAudio(this.cmp);
     localStorage.setItem(AUDIO_KEY, JSON.stringify({ volume: this.state.volume, muted: this.state.muted }));
   }
   setMuted(muted: boolean) {

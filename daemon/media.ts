@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, renameSync, readFileSync, writeFileSync, mkdirSync, rmSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { SLATE_CACHE } from "./paths";
+import { BLANK_CACHE } from "./paths";
 
 function findOnPath(name: string): string | undefined {
   const dirs = (process.env.PATH ?? "").split(";");
@@ -24,7 +24,7 @@ function wingetFfmpeg(packages: string): string | undefined {
 }
 
 export function findFfmpeg(): string | undefined {
-  const override = process.env.DAILIES_FFMPEG;
+  const override = process.env.SLATE_FFMPEG;
   if (override) return existsSync(override) ? override : undefined;
   const local = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local");
   const candidates = [
@@ -39,7 +39,7 @@ export function findFfmpeg(): string | undefined {
 
 const foundFfmpeg = findFfmpeg();
 export const FFMPEG_FOUND = !!foundFfmpeg;
-export const FFMPEG = foundFfmpeg ?? process.env.DAILIES_FFMPEG ?? "ffmpeg";
+export const FFMPEG = foundFfmpeg ?? process.env.SLATE_FFMPEG ?? "ffmpeg";
 
 export async function run(args: string[], input?: Uint8Array): Promise<{ code: number; stderr: string; stdout: Uint8Array }> {
   const p = Bun.spawn(args, { stdin: input ? "pipe" : "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true });
@@ -60,7 +60,7 @@ async function ffmpeg(args: string[], input?: Uint8Array) {
 let encoderProbe: Promise<string> | undefined;
 export function pickEncoder(): Promise<string> {
   encoderProbe ??= (async () => {
-    if (process.env.DAILIES_ENCODER) return process.env.DAILIES_ENCODER;
+    if (process.env.SLATE_ENCODER) return process.env.SLATE_ENCODER;
     if (!FFMPEG_FOUND) return "libx264";
     try {
       const r = await run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30:d=0.2", "-c:v", "h264_amf", "-f", "null", "-"]);
@@ -181,13 +181,13 @@ export async function encodeMovie(video: string[], audio: (string | undefined)[]
   }
 }
 
-const slates = new Map<string, Promise<string>>();
-export function makeSlate(width: number, height: number, ms: number, fps: number): Promise<string> {
+const blanks = new Map<string, Promise<string>>();
+export function makeBlank(width: number, height: number, ms: number, fps: number): Promise<string> {
   const key = `${width}x${height}-${ms}-${fps}`;
-  let p = slates.get(key);
+  let p = blanks.get(key);
   if (!p) {
     p = (async () => {
-      const out = join(SLATE_CACHE, `slate-${key}.mp4`);
+      const out = join(BLANK_CACHE, `blank-${key}.mp4`);
       if (existsSync(out)) return out;
       const encoder = await pickEncoder();
       const frames = Math.max(1, Math.round((ms * fps) / 1000));
@@ -199,7 +199,7 @@ export function makeSlate(width: number, height: number, ms: number, fps: number
       renameSync(tmp, out);
       return out;
     })();
-    slates.set(key, p);
+    blanks.set(key, p);
   }
   return p;
 }

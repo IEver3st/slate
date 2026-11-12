@@ -1,6 +1,6 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { appHome, legacyShellDir, shellDir } from "../src/home";
 
 export type Release = {
   sha: string;
@@ -21,15 +21,15 @@ type State = { failed: Record<string, { at: string; step: string; error: string 
 
 const REPO = resolve(import.meta.dir, "..");
 const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
-const REMOTE: string = process.env.DAILIES_REMOTE ?? pkg.repository?.url ?? "https://github.com/IEver3st/dailies.git";
-const APP_DIR = join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Dailies");
+const REMOTE: string = process.env.SLATE_REMOTE ?? pkg.repository?.url ?? "https://github.com/IEver3st/slate.git";
+const APP_DIR = appHome();
 const RELEASES = join(APP_DIR, "releases");
 const SOURCE = join(APP_DIR, "source.git");
 const CURRENT = join(RELEASES, "current.json");
 const STATE = join(RELEASES, "state.json");
 const LOCK = join(RELEASES, ".lock");
 const LOG = join(APP_DIR, "updates.log");
-const SHELL_VERSION = join(process.env.LOCALAPPDATA ?? "", "Programs", "Dailies", "version");
+const SHELL_VERSION = join(existsSync(shellDir()) ? shellDir() : legacyShellDir(), "version");
 const MCP_ENTRY = join(APP_DIR, "mcp.mjs");
 const KEEP = 3;
 

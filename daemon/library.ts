@@ -171,7 +171,7 @@ export function libraryPoster(path: string, entryUrl: (name: string, sig: string
       return out;
     } catch (e) {
       failed.set(out, k.sig);
-      console.log(`[dailies] no library poster for ${path}: ${e instanceof Error ? e.message : e}`);
+      console.log(`[slate] no library poster for ${path}: ${e instanceof Error ? e.message : e}`);
       return undefined;
     } finally {
       rmSync(tmp, { force: true });

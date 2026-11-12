@@ -63,6 +63,8 @@ export function Player({
   compare,
   revLabel,
   onGutter,
+  flip,
+  busy,
 }: {
   src?: string;
   controller: PlayerController;
@@ -71,6 +73,8 @@ export function Player({
   compare?: { src?: string; label: string; mode: CompareMode; pos: number; onPos: (p: number) => void };
   revLabel: string;
   onGutter?: (px: number) => void;
+  flip?: boolean;
+  busy?: boolean;
 }) {
   const a = useRef<HTMLVideoElement>(null);
   const b = useRef<HTMLVideoElement>(null);
@@ -143,10 +147,10 @@ export function Player({
     if (compare?.src) {
       if (c.src !== compare.src) {
         c.src = compare.src;
-        c.muted = true;
         void once(c, "loadedmetadata").then(() => controller.syncCompare(true));
       }
       controller.compare = c;
+      controller.applyAudio(c);
     } else {
       controller.compare = undefined;
       c.removeAttribute("src");
@@ -167,7 +171,10 @@ export function Player({
     window.addEventListener("pointerup", up);
   };
 
-  const showCompare = !!compare?.src && (compare.mode !== "diff" || !playing);
+  const flipped = !!flip && !!compare?.src && !side;
+  const showCompare = !!compare?.src && (flipped || compare.mode !== "diff" || !playing);
+  const time = usePlayerSelect(controller, (s) => s.time);
+  const cmpEnd = flipped && cmp.current?.duration ? cmp.current.duration * 1000 : Infinity;
   const videoClass = "absolute inset-0 size-full object-contain";
 
   return (
@@ -185,14 +192,20 @@ export function Player({
           <video
             ref={cmp}
             className={cn(videoClass, "z-[2]", !showCompare && "opacity-0")}
-            style={compare?.mode === "wipe" ? { clipPath: `inset(0 ${100 - compare.pos}% 0 0)` } : compare?.mode === "diff" ? { mixBlendMode: "difference" } : undefined}
+            style={flipped ? undefined : compare?.mode === "wipe" ? { clipPath: `inset(0 ${100 - compare.pos}% 0 0)` } : compare?.mode === "diff" ? { mixBlendMode: "difference" } : undefined}
             playsInline
             preload="auto"
           />
         )}
         <div className="absolute inset-0 z-[3]">{overlay}</div>
-        {compare?.src && compare.mode === "wipe" && (
-          <div className="absolute inset-0 z-[4] cursor-ew-resize" onPointerDown={dragWipe}>
+        {flipped && (
+          <>
+            <Tag side="left">Showing {compare!.label}</Tag>
+            {time > cmpEnd && <div className="pointer-events-none absolute inset-x-0 bottom-3 z-[5] text-center text-[12.5px] text-soft">{compare!.label} ends at {Math.floor(cmpEnd / 1000)}s</div>}
+          </>
+        )}
+        {compare?.src && compare.mode === "wipe" && !flipped && (
+          <div className={cn("absolute inset-0 z-[4] cursor-ew-resize", busy && "pointer-events-none")} onPointerDown={dragWipe}>
             <div className="absolute inset-y-0 w-0.5 bg-amber shadow-[0_0_0_1px_rgba(0,0,0,.4)]" style={{ left: `${compare.pos}%` }}>
               <div className="absolute top-1/2 left-1/2 grid size-7 -translate-1/2 place-items-center rounded-full bg-amber text-[11px] font-bold text-amber-ink">{"<>"}</div>
             </div>
@@ -200,7 +213,7 @@ export function Player({
             <Tag side="right">{revLabel}</Tag>
           </div>
         )}
-        {compare?.src && compare.mode === "diff" && (
+        {compare?.src && compare.mode === "diff" && !flipped && (
           <div className="pointer-events-none absolute inset-x-0 bottom-3 z-[4] text-center text-[12.5px] text-soft">
             {playing ? "Difference shows while paused" : `Difference between ${compare.label} and ${revLabel}: black means unchanged`}
           </div>

@@ -1,11 +1,11 @@
 import { copyFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-const ffmpeg = process.env.DAILIES_FFMPEG || "ffmpeg";
-const jobDir = process.env.DAILIES_JOB;
-const encoder = process.env.DAILIES_ENCODER || "libx264";
-const gop = Number(process.env.DAILIES_GOP || "60");
-const deliverable = process.env.DAILIES_EXPORT === "1";
+const ffmpeg = process.env.SLATE_FFMPEG || "ffmpeg";
+const jobDir = process.env.SLATE_JOB;
+const encoder = process.env.SLATE_ENCODER || "libx264";
+const gop = Number(process.env.SLATE_GOP || "60");
+const deliverable = process.env.SLATE_EXPORT === "1";
 
 function rewriteEncode(args: string[]): string[] {
   const out: string[] = [];

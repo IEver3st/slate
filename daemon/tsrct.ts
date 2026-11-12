@@ -4,7 +4,7 @@ import { join } from "node:path";
 export const TESSERACT_VERSION = "0.4.0";
 
 export function tryFindCli(): string | undefined {
-  const override = process.env.DAILIES_TSRCT;
+  const override = process.env.SLATE_TSRCT;
   if (override && existsSync(override)) return override;
   const local = process.env.LOCALAPPDATA ?? join(process.env.USERPROFILE ?? "", "AppData", "Local");
   const root = join(local, "Tesseract", "public-cli");
@@ -29,7 +29,7 @@ export function tryFindCli(): string | undefined {
 
 export function findCli(): string {
   const cli = tryFindCli();
-  if (!cli) throw new Error(`Tesseract CLI not found. Install Tesseract CLI ${TESSERACT_VERSION}; Dailies picks it up on its own. Click Connect agent in Dailies for the steps.`);
+  if (!cli) throw new Error(`Tesseract CLI not found. Install Tesseract CLI ${TESSERACT_VERSION}; Slate picks it up on its own. Click Connect agent in Slate for the steps.`);
   return cli;
 }
 
@@ -40,7 +40,7 @@ export async function cliVersion(cli: string): Promise<string> {
   return out.trim().replace(/^tsrct(\.exe)?\s*/, "");
 }
 
-const FONT_PIN_HINT = " If this archive was saved by `tsrct project apply`, that pinned its text layers to font assets (sourceText.fontAssetId), which is what fails here. Remove those pins with `tsrct project checkout` and `tsrct project commit` and it renders again. Edits made in Dailies already do this.";
+const FONT_PIN_HINT = " If this archive was saved by `tsrct project apply`, that pinned its text layers to font assets (sourceText.fontAssetId), which is what fails here. Remove those pins with `tsrct project checkout` and `tsrct project commit` and it renders again. Edits made in Slate already do this.";
 
 export type ExportProgress = { phase: string; completed?: number; total?: number; elapsed?: number; eta?: number; rate?: number };
 
@@ -128,7 +128,7 @@ export function exportSpan(opts: {
         return false;
       }
     })();
-    if (code === 0 && reported && wrote) console.error(`[dailies] tsrct reported an error but finished the export: ${reported}`);
+    if (code === 0 && reported && wrote) console.error(`[slate] tsrct reported an error but finished the export: ${reported}`);
     else if (code !== 0 || reported) {
       const why = reported?.replace(/\s*\n\s*/g, " ") || stderrTail.trim().split("\n").slice(-6).join(" | ") || "it stopped without an error message";
       throw new Error(`tsrct export failed (${code}): ${why}${/strict font resolution failed/i.test(why) ? FONT_PIN_HINT : ""}`);

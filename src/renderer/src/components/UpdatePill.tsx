@@ -7,8 +7,8 @@ export function UpdatePill() {
   const [state, setState] = useState<UpdateState>();
 
   useEffect(() => {
-    void window.dailies?.updateState?.().then(setState);
-    return window.dailies?.onUpdate?.(setState);
+    void window.slate?.updateState?.().then(setState);
+    return window.slate?.onUpdate?.(setState);
   }, []);
 
   if (!state?.enabled || !state.running) return null;
@@ -29,7 +29,7 @@ export function UpdatePill() {
           <span className="font-mono text-amber">{ready.short}</span> is ready
         </span>
       </Tip>
-      <Button size="sm" variant="primary" onClick={() => void window.dailies?.applyUpdate()}>
+      <Button size="sm" variant="primary" onClick={() => void window.slate?.applyUpdate()}>
         Restart
       </Button>
     </div>

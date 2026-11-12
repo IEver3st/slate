@@ -45,7 +45,7 @@ function repoUrl() {
     const url: string | undefined = pkg.repository?.url;
     if (url) return url.replace(/\.git$/, "");
   } catch {}
-  return "https://github.com/IEver3st/dailies";
+  return "https://github.com/IEver3st/slate";
 }
 
 function release() {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync, statSync, readdirSync, readFileSync, uti
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { exportSpan, findCli, tryFindCli } from "./tsrct";
-import { FFMPEG, PCM_BYTES_PER_FRAME, PCM_RATE, encodeMovie, pickEncoder, readWav, run, sliceWav, splitSpan, writeBuffer, moveInto, makeSlate } from "./media";
+import { FFMPEG, PCM_BYTES_PER_FRAME, PCM_RATE, encodeMovie, pickEncoder, readWav, run, sliceWav, splitSpan, writeBuffer, moveInto, makeBlank } from "./media";
 import { AUDIO_CACHE, BIN_DIR, FRAME_CACHE, JOB_DIR, MOVIE_CACHE, THUMB_CACHE, VIDEO_CACHE } from "./paths";
 import { SEGMENT_MS } from "./doc";
 import { emit } from "./events";
@@ -11,7 +11,7 @@ import type { Cut, SourceLease } from "./cuts";
 import { RENDER_SETTINGS, stampOf } from "./cuts";
 import type { Revision, SegmentState } from "./types";
 
-export const SHIM = join(BIN_DIR, "dailies-ffmpeg.exe");
+export const SHIM = join(BIN_DIR, "slate-ffmpeg.exe");
 
 export async function ensureShim(daemonDir: string) {
   const src = join(daemonDir, "shim.ts");
@@ -319,7 +319,7 @@ export class Renderer {
     if (!source) {
       job.state = "failed";
       job.error = "the archive for this revision is no longer available";
-      console.error(`[dailies] skipped ${job.cut.name} r${job.rev} ${job.from}-${job.to}: ${job.error}`);
+      console.error(`[slate] skipped ${job.cut.name} r${job.rev} ${job.from}-${job.to}: ${job.error}`);
       return;
     }
     try {
@@ -355,7 +355,7 @@ export class Renderer {
         startMs,
         durationMs,
         shim: SHIM,
-        env: { DAILIES_JOB: dir, DAILIES_ENCODER: encoder, DAILIES_GOP: String(Math.max(1, Math.round((fps * RENDER_SETTINGS.keyframeMs) / 1000))), DAILIES_FFMPEG: FFMPEG },
+        env: { SLATE_JOB: dir, SLATE_ENCODER: encoder, SLATE_GOP: String(Math.max(1, Math.round((fps * RENDER_SETTINGS.keyframeMs) / 1000))), SLATE_FFMPEG: FFMPEG },
         onProgress: (p) => {
           if (p.phase === "render" && firstRenderAt === undefined) firstRenderAt = Date.now();
           if (p.total) {
@@ -387,7 +387,7 @@ export class Renderer {
         st.perSegmentMs = st.samples ? st.perSegmentMs * 0.6 + perSeg * 0.4 : perSeg;
         st.samples++;
       }
-      console.log(`[dailies] rendered ${cut.name} r${job.rev} ${job.from}-${job.to}${job.audioOnly ? " (audio only)" : ""} in ${total} ms`);
+      console.log(`[slate] rendered ${cut.name} r${job.rev} ${job.from}-${job.to}${job.audioOnly ? " (audio only)" : ""} in ${total} ms`);
       job.state = "done";
       job.progress = 1;
       emit({ type: "render", cutId: cut.id, rev: job.rev, span: [job.from, job.to], progress: 1, state: "done" });
@@ -399,7 +399,7 @@ export class Renderer {
       if (msg === "superseded") rmSync(dir, { recursive: true, force: true });
       else {
         for (let i = 0; i < job.vkeys.length; i++) this.failures.set(`${job.vkeys[i]}:${job.akeys[i]}`, { at: Date.now(), error: msg });
-        console.error(`[dailies] render ${cut.name} r${job.rev} ${job.from}-${job.to} failed: ${msg}`);
+        console.error(`[slate] render ${cut.name} r${job.rev} ${job.from}-${job.to} failed: ${msg}`);
         if (firstRenderAt === undefined && !msg.includes("changed while rendering")) {
           const siblings = this.queue.filter((j) => j.cut.id === cut.id && j.hash === job.hash);
           for (const j of siblings) for (let i = 0; i < j.vkeys.length; i++) this.failures.set(`${j.vkeys[i]}:${j.akeys[i]}`, { at: Date.now(), error: msg });
@@ -492,7 +492,7 @@ export class Renderer {
         audio.push(oldA);
         stale.push(s);
       } else {
-        video.push(await makeSlate(rev.width, rev.height, lengths[s], RENDER_SETTINGS.fps));
+        video.push(await makeBlank(rev.width, rev.height, lengths[s], RENDER_SETTINGS.fps));
         audio.push(oldA);
         missing.push(s);
       }
@@ -575,7 +575,7 @@ export class Renderer {
         removed++;
       } catch {}
     }
-    if (removed) console.log(`[dailies] cache trimmed from ${(before / 1e9).toFixed(2)} GB to ${(total / 1e9).toFixed(2)} GB (${removed} files)`);
+    if (removed) console.log(`[slate] cache trimmed from ${(before / 1e9).toFixed(2)} GB to ${(total / 1e9).toFixed(2)} GB (${removed} files)`);
     return { before, after: total, removed };
   }
 }
@@ -587,9 +587,9 @@ function spanAudio(dir: string, segmentCount: number, lengths: number[]): Buffer
   try {
     calls = readFileSync(join(dir, "shim.log"), "utf8");
   } catch {
-    throw new Error(`tsrct never ran Dailies' ffmpeg shim, so the span's audio is unknown (no ${join(dir, "shim.log")})`);
+    throw new Error(`tsrct never ran Slate' ffmpeg shim, so the span's audio is unknown (no ${join(dir, "shim.log")})`);
   }
-  if (/\.wav"/i.test(calls) || /^error /m.test(calls)) throw new Error(`the span's audio was mixed but never reached Dailies (see ${join(dir, "shim.log")})`);
+  if (/\.wav"/i.test(calls) || /^error /m.test(calls)) throw new Error(`the span's audio was mixed but never reached Slate (see ${join(dir, "shim.log")})`);
   return lengths.map((ms) => Buffer.alloc(SEGMENT_PCM_BYTES(ms)));
 }
 

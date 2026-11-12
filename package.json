@@ -1,12 +1,12 @@
 {
-  "name": "dailies",
-  "productName": "Dailies",
+  "name": "slate",
+  "productName": "Slate",
   "version": "0.2.0",
   "private": true,
   "description": "Review room for agent-made Tesseract videos",
   "repository": {
     "type": "git",
-    "url": "https://github.com/IEver3st/dailies.git"
+    "url": "https://github.com/IEver3st/slate.git"
   },
   "main": "out/main/index.js",
   "type": "module",
