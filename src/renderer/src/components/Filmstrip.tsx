@@ -29,6 +29,27 @@ function laneLayout(items: TrackItem[]) {
   }).filter((l) => l.rows.length);
 }
 
+const TRACKS_KEY = "slate-tracks-height";
+const TRACKS_DEFAULT = 220;
+const TRACKS_MIN = 64;
+const PLAYER_RESERVE = 560;
+
+function readTracksHeight() {
+  try {
+    const v = Number(localStorage.getItem(TRACKS_KEY));
+    return Number.isFinite(v) && v >= TRACKS_MIN ? v : TRACKS_DEFAULT;
+  } catch {
+    return TRACKS_DEFAULT;
+  }
+}
+
+function saveTracksHeight(v: number | undefined) {
+  try {
+    if (v === undefined) localStorage.removeItem(TRACKS_KEY);
+    else localStorage.setItem(TRACKS_KEY, String(Math.round(v)));
+  } catch {}
+}
+
 function shortName(n: string) {
   return n.replace(/^(caption|touch|close|review|hook|pre-roll): /i, "").replace(/ \(real app[^)]*\)/i, "");
 }
@@ -88,6 +109,53 @@ export function Filmstrip({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  const tracks = useRef<HTMLDivElement>(null);
+  const [tracksMax, setTracksMax] = useState(readTracksHeight);
+  const [more, setMore] = useState(false);
+  const measureMore = () => {
+    const el = tracks.current;
+    if (el) setMore(el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+  };
+  useEffect(() => {
+    const el = tracks.current;
+    if (!el) return;
+    const ro = new ResizeObserver(measureMore);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const box = tracks.current;
+    if (!box || selectedLayer === undefined) return;
+    const el = box.querySelector<HTMLElement>(`[data-layer="${selectedLayer}"]`);
+    if (!el) return;
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    if (top < box.scrollTop) box.scrollTop = top - 4;
+    else if (top + el.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = top + el.offsetHeight - box.clientHeight + 4;
+  }, [selectedLayer]);
+  const resizeTracks = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const y0 = e.clientY;
+    const h0 = tracks.current?.clientHeight ?? tracksMax;
+    const full = tracks.current?.scrollHeight ?? Infinity;
+    const limit = () => Math.max(TRACKS_MIN, Math.min(full, window.innerHeight - PLAYER_RESERVE));
+    let h = h0;
+    const move = (ev: PointerEvent) => {
+      h = Math.max(TRACKS_MIN, Math.min(limit(), h0 + y0 - ev.clientY));
+      setTracksMax(h);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      saveTracksHeight(h);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
   const [drag, setDrag] = useState<{ id: number; start: number; end: number }>();
   const [scrubbing, setScrubbing] = useState(false);
   const prevStates = useRef<string[]>([]);
@@ -211,6 +279,14 @@ export function Filmstrip({
 
   return (
     <div className="relative grid shrink-0 touch-none select-none bg-well pt-2 pb-3" style={{ gridTemplateColumns: `${labelW}px 1fr 20px` }} onPointerDown={(e) => scrub(e)}>
+      <div
+        className="group/resize absolute inset-x-0 -top-1 z-20 flex h-2 cursor-row-resize justify-center"
+        title="Drag to resize the tracks, double-click to reset"
+        onPointerDown={resizeTracks}
+        onDoubleClick={() => (setTracksMax(TRACKS_DEFAULT), saveTracksHeight(undefined))}
+      >
+        <i className="mt-[3px] h-0.5 w-10 rounded-full bg-line opacity-0 transition-opacity group-hover/resize:opacity-100" />
+      </div>
       <div />
       <div className="relative h-[22px] cursor-text" onPointerDown={rule} title="Click to jump, drag to mark a range">
         {Array.from({ length: seconds }, (_, s) => (
@@ -296,47 +372,67 @@ export function Filmstrip({
             <div />
           </div>
         )}
-        {lanes.map((lane) => (
-          <div key={lane.key} className="contents">
-            <div className="flex items-start pt-[3px] pl-5 text-[12px] text-dim">{lane.label}</div>
-            <div className="relative mb-[3px] cursor-ew-resize" style={{ height: lane.rows.length * 19 - 3 }}>
-              {lane.rows.map((row, ri) =>
-                row.map((it) => {
-                  const d = drag?.id === it.id ? drag : undefined;
-                  const start = d?.start ?? it.start;
-                  const end = d?.end ?? it.end;
-                  const sel = selectedLayer === it.id;
-                  const label = shortName(it.name);
-                  const roomy = ((end - start) / duration) * areaW >= 40;
-                  return (
-                    <div
-                      key={it.id}
-                      onPointerDown={(e) => grab(e, it, "move")}
-                      title={`${it.name}\n${tc(start)} to ${tc(end)}`}
-                      className={cn(
-                        "absolute flex h-4 items-center overflow-hidden rounded-[4px] px-1.5 text-[11px] leading-none whitespace-nowrap",
-                        lane.key === "text" ? "bg-text text-ink" : lane.key === "picture" ? "bg-lane-picture text-lane-picture-text" : lane.key === "graphics" ? "bg-lane-graphics text-soft" : "bg-lane-other text-dim",
-                        it.hidden && "opacity-40",
-                        sel && "shadow-[0_0_0_2px_var(--color-amber)]",
-                        sel && it.editable.timing ? "cursor-grab" : "cursor-pointer",
-                      )}
-                      style={{ left: pct(start), width: pct(end - start), top: ri * 19 }}
-                    >
-                      {roomy && <span className="truncate leading-[14px]">{label}</span>}
-                      {sel && it.editable.timing && (
-                        <>
-                          <span className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-amber" onPointerDown={(e) => grab(e, it, "start")} />
-                          <span className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-amber" onPointerDown={(e) => grab(e, it, "end")} />
-                        </>
-                      )}
-                    </div>
-                  );
-                }),
-              )}
+      </div>
+
+      <div
+        ref={tracks}
+        className="col-span-3 overflow-x-hidden overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+        style={{
+          maxHeight: `max(${TRACKS_MIN}px, min(${tracksMax}px, 100vh - ${PLAYER_RESERVE}px))`,
+          maskImage: more ? "linear-gradient(to bottom, black calc(100% - 28px), transparent)" : undefined,
+        }}
+        onScroll={measureMore}
+        onPointerDown={(e) => {
+          if (e.target === e.currentTarget && e.nativeEvent.offsetX >= e.currentTarget.clientWidth) e.stopPropagation();
+        }}
+      >
+        <div>
+          {lanes.map((lane) => (
+            <div key={lane.key} className="grid" style={{ gridTemplateColumns: `${labelW}px 1fr 10px` }}>
+              <div className="sticky top-0 flex items-start self-start pt-[3px] pl-5 text-[12px] text-dim">{lane.label}</div>
+              <div className="relative mb-[3px] cursor-ew-resize" style={{ height: lane.rows.length * 19 - 3 }}>
+                {lane.rows.map((row, ri) =>
+                  row.map((it) => {
+                    const d = drag?.id === it.id ? drag : undefined;
+                    const start = d?.start ?? it.start;
+                    const end = d?.end ?? it.end;
+                    const sel = selectedLayer === it.id;
+                    const label = shortName(it.name);
+                    const roomy = ((end - start) / duration) * areaW >= 40;
+                    return (
+                      <div
+                        key={it.id}
+                        data-layer={it.id}
+                        onPointerDown={(e) => grab(e, it, "move")}
+                        title={`${it.name}\n${tc(start)} to ${tc(end)}`}
+                        className={cn(
+                          "absolute flex h-4 items-center overflow-hidden rounded-[4px] px-1.5 text-[11px] leading-none whitespace-nowrap",
+                          lane.key === "text" ? "bg-text text-ink" : lane.key === "picture" ? "bg-lane-picture text-lane-picture-text" : lane.key === "graphics" ? "bg-lane-graphics text-soft" : "bg-lane-other text-dim",
+                          it.hidden && "opacity-40",
+                          sel && "shadow-[0_0_0_2px_var(--color-amber)]",
+                          sel && it.editable.timing ? "cursor-grab" : "cursor-pointer",
+                        )}
+                        style={{ left: pct(start), width: pct(end - start), top: ri * 19 }}
+                      >
+                        {roomy && <span className="truncate leading-[14px]">{label}</span>}
+                        {sel && it.editable.timing && (
+                          <>
+                            <span className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-amber" onPointerDown={(e) => grab(e, it, "start")} />
+                            <span className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-amber" onPointerDown={(e) => grab(e, it, "end")} />
+                          </>
+                        )}
+                      </div>
+                    );
+                  }),
+                )}
+              </div>
+              <div />
             </div>
-            <div />
-          </div>
-        ))}
+          ))}
+        </div>
+      </div>
+
+      <div className="col-span-3 grid" style={{ gridTemplateColumns: `${labelW}px 1fr 20px` }}>
         {hasPeaks && (
           <div className="contents">
             <div className="flex items-start pl-5 text-[12px] text-dim">Mix</div>
