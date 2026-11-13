@@ -1,0 +1,12 @@
+{
+  "masters": { "full": "icon.svg", "small": "small.svg" },
+  "smallBelow": 48,
+  "inset": 0.02,
+  "outputs": [
+    { "file": "../icon.png", "size": 256 },
+    { "file": "../icon.ico", "sizes": [16, 20, 24, 32, 40, 48, 64, 128, 256] },
+    { "file": "../tray.png", "size": 32, "master": "small", "inset": 0 },
+    { "file": "../tray24.png", "size": 24, "master": "small", "inset": 0 },
+    { "file": "../tray16.png", "size": 16, "master": "small", "inset": 0 }
+  ]
+}

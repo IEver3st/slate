@@ -34,6 +34,7 @@ export type SlateBridge = {
   reveal(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
   onNavigate(fn: (cutId: string) => void): () => void;
+  onShown?(fn: () => void): () => void;
 };
 
 declare global {

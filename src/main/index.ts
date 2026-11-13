@@ -261,6 +261,7 @@ function createWindow() {
     win?.hide();
     updater.windowHidden();
   });
+  win.on("show", () => win?.webContents.send("slate:shown"));
   win.once("ready-to-show", () => {
     if (!startHidden) win?.show();
   });
@@ -324,7 +325,10 @@ function updateItems(u: UpdateState): Electron.MenuItemConstructorOptions[] {
 }
 
 function buildTray() {
-  const image = nativeImage.createFromPath(join(RESOURCES, "tray.png"));
+  const image = nativeImage.createFromPath(join(RESOURCES, "tray16.png"));
+  for (const [scaleFactor, file] of [[1.5, "tray24.png"], [2, "tray.png"]] as const) {
+    image.addRepresentation({ scaleFactor, buffer: nativeImage.createFromPath(join(RESOURCES, file)).toPNG() });
+  }
   tray = new Tray(image);
   tray.setToolTip("Slate");
   const refresh = () =>

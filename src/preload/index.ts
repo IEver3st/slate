@@ -37,4 +37,9 @@ contextBridge.exposeInMainWorld("slate", {
     ipcRenderer.on("slate:navigate", handler);
     return () => ipcRenderer.off("slate:navigate", handler);
   },
+  onShown: (fn: () => void) => {
+    const handler = () => fn();
+    ipcRenderer.on("slate:shown", handler);
+    return () => ipcRenderer.off("slate:shown", handler);
+  },
 });
