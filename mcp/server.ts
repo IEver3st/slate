@@ -96,14 +96,27 @@ function clientHeader() {
   return c?.name ? `${c.name}/${c.version ?? ""}` : "";
 }
 
-async function call(path: string, body?: Record<string, unknown>): Promise<any> {
+async function send(path: string, body?: Record<string, unknown>) {
   const info = await daemon();
-  const r = await fetch(`http://127.0.0.1:${info.port}${path}`, {
+  return fetch(`http://127.0.0.1:${info.port}${path}`, {
     method: body ? "POST" : "GET",
     headers: { "x-slate-token": info.token, "content-type": "application/json", "x-slate-client": clientHeader(), "x-slate-t3": IN_T3 ? "1" : "0" },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(70_000),
   });
+}
+
+async function call(path: string, body?: Record<string, unknown>): Promise<any> {
+  let r: Response;
+  try {
+    r = await send(path, body);
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    if (code !== "ECONNREFUSED" && path !== "/api/agent/wait") throw e;
+    const until = Date.now() + 30_000;
+    while (Date.now() < until && !(await healthy(readInfo()))) await Bun.sleep(1000);
+    r = await send(path, body);
+  }
   const text = await r.text();
   let data: any;
   try {
@@ -171,6 +184,7 @@ const server = new McpServer(
       `Slate is ${WHOSE} review room for Tesseract (.tsrct) videos. It renders every saved revision of a cut with hardware playback, and ${WHO} leaves timestamped notes, frame drawings and direct edits there. Use it whenever you make or revise a .tsrct video ${WHO} will watch, instead of exporting drafts.`,
       `Loop: slate_open the .tsrct when you start (${WHO} sees it live; read any open notes first), slate_status while you work, edit and save the project with the tsrct CLI as usual, then slate_publish with a one-line summary and the ids of the notes you addressed. Read feedback with slate_feedback, look at its frame and markedFrame PNGs, and answer notes with slate_reply.`,
       `Edits ${WHO} made in Slate are already in the .tsrct: if the project is built from a generator script or config, fold them into it before rebuilding, or the rebuild reverts them. Never edit the .slate folder next to a cut. Use slate_frame instead of \`tsrct preview\`: it returns the frame exactly as Slate rendered it. slate_check reports what Slate can see on this PC.`,
+      `${WHO} keeps memes, stickers, sound effects and clips in Slate's media library, per project and global. When a note has media, or a video needs a reaction, sticker or sound, look there with slate_media before searching the web; save finds worth keeping with slate_media_add.`,
       wake,
     ].join("\n\n"),
   },
@@ -287,6 +301,42 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   ({ cut }) => guarded(async () => text(await call("/api/agent/revisions", { cut, agent: await agentName() }))),
+);
+
+const cutRef = (c?: string) => (c ? (c.toLowerCase().endsWith(".tsrct") ? resolve(c) : c) : undefined);
+
+server.registerTool(
+  "slate_media",
+  {
+    title: "Find media in the library",
+    description: `${WHOSE} media library: memes, stickers, reaction clips, sound effects and music saved for one project or for every project. Returns absolute file paths, folders, kind, size, duration, whether it is animated or transparent, and how to package each kind into a .tsrct.`,
+    inputSchema: {
+      cut: cut.optional().describe("The cut whose project media to include. Omit to search only the global library."),
+      scope: z.enum(["all", "project", "global"]).optional().describe("Default all: the project's media and the global library."),
+      query: z.string().optional().describe("Words that must all appear in the name or folder, e.g. 'vine boom'."),
+      folder: z.string().optional().describe("Only this folder and its subfolders, e.g. 'Sound effects'."),
+      kind: z.enum(["image", "video", "audio"]).optional(),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ cut, scope, query, folder, kind }) => guarded(async () => text(await call("/api/media/find", { cut: cutRef(cut), scope: cut ? scope : "global", query, folder, kind }))),
+);
+
+server.registerTool(
+  "slate_media_add",
+  {
+    title: "Save media to the library",
+    description: `Copy a local file or folder, or download a link, into ${WHOSE} media library so it shows up in Slate. Page links (Giphy, Tenor, Imgur and similar) work: Slate takes the page's video or image.`,
+    inputSchema: {
+      path: z.string().optional().describe("Absolute path of an image, video, sound, or a folder of them."),
+      url: z.string().optional().describe("A direct media link or a page that shows one."),
+      scope: z.enum(["project", "global"]).describe("project keeps it with one cut; global makes it available to every project."),
+      cut: cut.optional().describe("Required for scope project."),
+      folder: z.string().optional().describe("Folder inside the library, created if missing, e.g. 'Reactions/Cats'."),
+      name: z.string().optional().describe("Name to save it under, without the extension."),
+    },
+  },
+  ({ path, url, scope, cut, folder, name }) => guarded(async () => text(await call("/api/media/add", { path: path ? resolve(path) : undefined, url, scope, cut: cutRef(cut), folder, name }))),
 );
 
 type Setup = {

@@ -21,6 +21,7 @@ function TextField({ layer, onEdit }: { layer: ContextLayer; onEdit: (e: EditReq
   return (
     <div className="mt-2 grid gap-2">
       <textarea
+        data-unsent={dirty || undefined}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => {
@@ -54,7 +55,7 @@ function VolumeField({ layer, onEdit }: { layer: ContextLayer; onEdit: (e: EditR
   const dirty = Math.abs(db - current) > 0.05;
   const nudge = (d: number) => setDb((v) => Math.max(-60, Math.min(12, Math.round((v + d) * 10) / 10)));
   return (
-    <div className="mt-2 flex items-center gap-2">
+    <div data-unsent={dirty || undefined} className="mt-2 flex items-center gap-2">
       <IconButton label="1 dB quieter" onClick={() => nudge(-1)}>
         <Minus />
       </IconButton>
@@ -93,7 +94,7 @@ function TimingField({ item, onEdit }: { item: TrackItem; onEdit: (e: EditReques
     </div>
   );
   return (
-    <div className="mt-2 grid gap-1">
+    <div data-unsent={dirty || undefined} className="mt-2 grid gap-1">
       {row("Starts", start, (v) => {
         const len = end - start;
         setStart(v);

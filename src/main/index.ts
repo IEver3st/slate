@@ -4,13 +4,15 @@ import { existsSync, readFileSync, writeFileSync, renameSync, openSync, mkdirSyn
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { createUpdater, type UpdateState } from "./updater";
+import { createUpdater, type ReleaseInfo, type UpdateState } from "./updater";
 import { createPreferences } from "./preferences";
 import type { Alert, SettingsSnapshot } from "../shared/preferences";
 import { resolveTheme } from "../shared/themes";
 import { appHome } from "../home";
 
 type DaemonInfo = { port: number; token: string; pid?: number; root?: string };
+type Presence = { lastInput: number; active?: string; unsent?: string; target?: { cutId: string; rev?: number; t?: number; tab?: string } };
+type Resume = { target?: Presence["target"]; visible: boolean; focused: boolean; bounds?: Electron.Rectangle; maximized?: boolean; minimized?: boolean; from?: string; to: string; subject: string; at: number };
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const APP_DIR = appHome();
@@ -20,7 +22,11 @@ else if (!RELEASED) app.setPath("userData", join(app.getPath("appData"), "Slate 
 const prefs = createPreferences(APP_DIR);
 const DAEMON_FILE = join(APP_DIR, "daemon.json");
 const RESOURCES = join(ROOT, "resources");
-const startHidden = process.argv.includes("--background");
+const RESUME_FILE = join(APP_DIR, "resume.json");
+const IDLE_MS = 3 * 60_000;
+let resume: Resume | undefined;
+let startHidden = process.argv.includes("--background");
+let resumeForRenderer: Omit<Resume, "visible" | "focused" | "bounds" | "maximized" | "at"> | undefined;
 const EXE = basename(process.execPath).toLowerCase();
 const LEGACY_SHELL = EXE === "dailies.exe";
 const INSTALLED = process.platform === "win32" && (EXE === "slate.exe" || LEGACY_SHELL);
@@ -41,8 +47,13 @@ const updater = createUpdater({
   icon: join(RESOURCES, "icon.png"),
   windowVisible: () => !!win?.isVisible(),
   autoRestart: () => prefs.get().autoRestart,
-  beforeRestart: () => {
+  holdReason,
+  beforeRestart: async (to, auto) => {
+    const fresh = await askPresence();
+    if (auto && (fresh?.unsent || fresh?.active)) return false;
     quitting = true;
+    saveResume(to, fresh);
+    return true;
   },
   onChange: (state) => {
     refreshTray?.();
@@ -50,6 +61,89 @@ const updater = createUpdater({
   },
 });
 let refreshTray: (() => void) | undefined;
+let lastPresence: Presence | undefined;
+let lastPresenceAt = 0;
+let windowUp = false;
+let normalBounds: Electron.Rectangle | undefined;
+
+function takeResumeFile(): Resume | undefined {
+  try {
+    const r = JSON.parse(readFileSync(RESUME_FILE, "utf8")) as Resume;
+    rmSync(RESUME_FILE, { force: true });
+    return Date.now() - r.at < 5 * 60_000 ? r : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let presenceSeq = 0;
+function askPresence(): Promise<Presence | undefined> {
+  const w = win;
+  if (!w || w.isDestroyed() || w.webContents.isLoading()) return Promise.resolve(undefined);
+  const id = ++presenceSeq;
+  return new Promise((done) => {
+    const timer = setTimeout(() => finish(undefined), 1500);
+    function finish(p: Presence | undefined) {
+      clearTimeout(timer);
+      ipcMain.off("slate:presence", onReply);
+      if (p) {
+        lastPresence = p;
+        lastPresenceAt = Date.now();
+      }
+      done(p);
+    }
+    function onReply(_e: unknown, replyId: number, p: Presence) {
+      if (replyId === id) finish(p);
+    }
+    ipcMain.on("slate:presence", onReply);
+    w.webContents.send("slate:presenceRequest", id);
+  });
+}
+
+async function daemonBusy() {
+  if (!daemon) return undefined;
+  try {
+    const r = await fetch(`http://127.0.0.1:${daemon.port}/api/busy`, { headers: { "x-slate-token": daemon.token }, signal: AbortSignal.timeout(2000) });
+    if (r.status === 404) return undefined;
+    const j: any = await r.json();
+    return Array.isArray(j.reasons) && j.reasons.length ? String(j.reasons[0]) : undefined;
+  } catch (e) {
+    return e instanceof Error && e.name === "TimeoutError" ? "Slate's render service is not answering" : undefined;
+  }
+}
+
+async function holdReason() {
+  if (!startHidden && !windowUp) return "Slate is still starting";
+  const fresh = await askPresence();
+  const p = fresh ?? (Date.now() - lastPresenceAt < 5 * 60_000 ? lastPresence : undefined);
+  if (p?.unsent) return p.unsent;
+  if (p?.active) return p.active;
+  if (win?.isVisible() && !win.isMinimized()) {
+    if (!fresh) return "Slate is still loading";
+    if (Date.now() - fresh.lastInput < IDLE_MS) return "you're using Slate";
+  }
+  return daemonBusy();
+}
+
+function saveResume(to: ReleaseInfo, fresh: Presence | undefined) {
+  const alive = win && !win.isDestroyed() ? win : undefined;
+  const visible = !!alive?.isVisible();
+  const r: Resume = {
+    target: (fresh ?? lastPresence)?.target,
+    visible,
+    focused: visible && !!alive?.isFocused(),
+    bounds: windowUp ? normalBounds : resume?.bounds,
+    maximized: !!alive?.isMaximized(),
+    minimized: !!alive?.isMinimized(),
+    from: updater.state().running?.short,
+    to: to.short,
+    subject: to.subject,
+    at: Date.now(),
+  };
+  try {
+    writeFileSync(RESUME_FILE, JSON.stringify(r));
+  } catch {}
+}
 
 function registerShortcut() {
   const link = join(START_MENU, "Slate.lnk");
@@ -246,6 +340,11 @@ function createWindow() {
       backgroundThrottling: false,
     },
   });
+  if (resume?.bounds) win.setContentBounds(resume.bounds);
+  win.webContents.on("will-navigate", (e, url) => {
+    const host = URL.canParse(url) ? new URL(url).hostname : "";
+    if (host !== "127.0.0.1" && host !== "localhost") e.preventDefault();
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -261,9 +360,27 @@ function createWindow() {
     win?.hide();
     updater.windowHidden();
   });
-  win.on("show", () => win?.webContents.send("slate:shown"));
+  const keepBounds = () => {
+    if (win && !win.isDestroyed() && !win.isMaximized() && !win.isMinimized() && !win.isFullScreen()) normalBounds = win.getContentBounds();
+  };
+  win.on("resize", keepBounds);
+  win.on("move", keepBounds);
+  win.on("show", () => {
+    if (!windowUp && resume?.maximized && !win?.isMaximized()) win?.maximize();
+    windowUp = true;
+    normalBounds ??= resume?.bounds;
+    keepBounds();
+    win?.webContents.send("slate:shown");
+  });
   win.once("ready-to-show", () => {
-    if (!startHidden) win?.show();
+    if (startHidden) return;
+    const quiet = !!resume && !resume.focused;
+    if (quiet) win?.setFocusable(false);
+    if (resume?.maximized) win?.maximize();
+    if (quiet) win?.showInactive();
+    else win?.show();
+    if (resume?.minimized) win?.minimize();
+    if (quiet) setTimeout(() => win?.setFocusable(true), 300);
   });
   const dev = rendererUrl();
   if (dev) void win.loadURL(dev);
@@ -449,6 +566,11 @@ ipcMain.handle("slate:openLog", (_e, which: string) => {
   const file = which === "updates" ? updater.logFile : which === "daemon" ? join(APP_DIR, "daemon.log") : undefined;
   if (file && existsSync(file)) void shell.openPath(file);
 });
+ipcMain.handle("slate:takeResume", () => {
+  const r = resumeForRenderer;
+  resumeForRenderer = undefined;
+  return r;
+});
 ipcMain.handle("slate:takeNavigation", () => {
   const nav = pendingNav;
   pendingNav = undefined;
@@ -456,6 +578,17 @@ ipcMain.handle("slate:takeNavigation", () => {
 });
 ipcMain.handle("slate:openFile", async () => {
   const r = await dialog.showOpenDialog(win!, { title: "Open a Tesseract project", properties: ["openFile", "multiSelections"], filters: [{ name: "Tesseract project", extensions: ["tsrct"] }] });
+  return r.canceled ? [] : r.filePaths;
+});
+ipcMain.handle("slate:openMedia", async () => {
+  const r = await dialog.showOpenDialog(win!, {
+    title: "Add media",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "Images, video and sound", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "mp4", "mov", "webm", "mkv", "m4v", "mp3", "wav", "ogg", "m4a", "flac", "aac", "opus"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
   return r.canceled ? [] : r.filePaths;
 });
 ipcMain.handle("slate:reveal", (_e, path: string) => {
@@ -472,6 +605,11 @@ app.on("before-quit", () => {
 
 void app.whenReady().then(async () => {
   if (!primary) return;
+  resume = takeResumeFile();
+  if (resume) {
+    startHidden = !resume.visible;
+    resumeForRenderer = { target: resume.target, from: resume.from, to: resume.to, subject: resume.subject };
+  }
   buildTray();
   try {
     daemon = await ensureDaemon();

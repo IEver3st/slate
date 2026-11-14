@@ -1,4 +1,5 @@
 import type { LayerChange, ContextLayer } from "./doc";
+import type { MediaRef } from "./medialib";
 
 export type Author = { kind: "you" | "agent" | "unknown"; name: string };
 
@@ -69,6 +70,7 @@ export type Note = {
   suggestion?: Suggestion;
   actions?: unknown[];
   overwrittenIn?: number;
+  media?: MediaRef[];
   thread: ThreadEntry[];
 };
 

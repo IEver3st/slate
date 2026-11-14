@@ -11,7 +11,11 @@ export type UpdateState = {
   checking: boolean;
   lastCheck?: string;
   failure?: { short: string; step: string; error: string };
+  waiting?: string;
 };
+
+export type Resume = { target?: { cutId: string; rev?: number; t?: number; tab?: string }; from?: string; to?: string; subject?: string };
+export type Presence = { lastInput: number; active?: string; unsent?: string; target?: Resume["target"] };
 
 export type SlateBridge = {
   initialTheme?: ThemeChoice;
@@ -30,7 +34,11 @@ export type SlateBridge = {
   onUpdate?(fn: (state: UpdateState) => void): () => void;
   connection(): Promise<{ base: string; token: string }>;
   takeNavigation(): Promise<string | undefined>;
+  takeResume?(): Promise<Resume | undefined>;
+  onPresenceRequest?(fn: () => Presence): () => void;
   openFile(): Promise<string[]>;
+  openMedia?(): Promise<string[]>;
+  pathForFile?(file: File): string | undefined;
   reveal(path: string): Promise<void>;
   openExternal(url: string): Promise<void>;
   onNavigate(fn: (cutId: string) => void): () => void;

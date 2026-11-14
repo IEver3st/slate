@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { exportSpan, findCli, tryFindCli } from "./tsrct";
 import { FFMPEG, PCM_BYTES_PER_FRAME, PCM_RATE, encodeMovie, pickEncoder, readWav, run, sliceWav, splitSpan, writeBuffer, moveInto, makeBlank } from "./media";
 import { AUDIO_CACHE, BIN_DIR, FRAME_CACHE, JOB_DIR, MOVIE_CACHE, THUMB_CACHE, VIDEO_CACHE } from "./paths";
+import { MEDIA_THUMBS } from "./medialib";
 import { SEGMENT_MS } from "./doc";
 import { emit } from "./events";
 import { cacheLimitBytes, onServiceChange, serviceSettings } from "./service";
@@ -151,6 +152,10 @@ export class Renderer {
       rendering: states.some((s) => s === "rendering" || s === "queued"),
       failed: states.filter((s) => s === "failed").length,
     };
+  }
+
+  rendering() {
+    return this.running.size > 0 || this.assembling.size > 0;
   }
 
   jobsFor(cutId: string) {
@@ -548,7 +553,7 @@ export class Renderer {
     }
     for (const m of this.movies.values()) pinned.add(m.file);
     const files: { path: string; size: number; at: number }[] = [];
-    for (const dir of [VIDEO_CACHE, AUDIO_CACHE, FRAME_CACHE, THUMB_CACHE, MOVIE_CACHE]) {
+    for (const dir of [VIDEO_CACHE, AUDIO_CACHE, FRAME_CACHE, THUMB_CACHE, MOVIE_CACHE, MEDIA_THUMBS]) {
       let names: string[] = [];
       try {
         names = readdirSync(dir);

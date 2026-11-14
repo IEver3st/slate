@@ -41,14 +41,16 @@ const foundFfmpeg = findFfmpeg();
 export const FFMPEG_FOUND = !!foundFfmpeg;
 export const FFMPEG = foundFfmpeg ?? process.env.SLATE_FFMPEG ?? "ffmpeg";
 
-export async function run(args: string[], input?: Uint8Array): Promise<{ code: number; stderr: string; stdout: Uint8Array }> {
+export async function run(args: string[], input?: Uint8Array, timeoutMs?: number): Promise<{ code: number; stderr: string; stdout: Uint8Array; timedOut?: boolean }> {
   const p = Bun.spawn(args, { stdin: input ? "pipe" : "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true });
+  let timedOut = false;
+  const timer = timeoutMs ? setTimeout(() => ((timedOut = true), p.kill()), timeoutMs) : undefined;
   if (input) {
     (p.stdin as any).write(input);
     (p.stdin as any).end();
   }
-  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).arrayBuffer(), new Response(p.stderr).text(), p.exited]);
-  return { code, stderr, stdout: new Uint8Array(stdout) };
+  const [stdout, stderr, code] = await Promise.all([new Response(p.stdout).arrayBuffer(), new Response(p.stderr).text(), p.exited]).finally(() => clearTimeout(timer));
+  return { code, stderr, stdout: new Uint8Array(stdout), timedOut: timedOut || undefined };
 }
 
 async function ffmpeg(args: string[], input?: Uint8Array) {

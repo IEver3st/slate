@@ -8,6 +8,7 @@ import { Button, IconButton } from "./ui/button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu";
 import type { Tool } from "./Sketch";
 import { preferences } from "@/lib/preferences";
+import { MediaChips } from "./Media";
 
 const statusText: Record<Note["status"], string> = {
   draft: "Draft",
@@ -152,6 +153,7 @@ function CueCard({
         {editing ? (
           <textarea
             autoFocus
+            data-unsent={text !== note.text || undefined}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -173,6 +175,7 @@ function CueCard({
             {note.text || <span className="text-dim">{note.tag ? tagOf(note.tag)?.sentence : unwritten(note) ? "Marker, not written yet" : ""}</span>}
           </div>
         )}
+        {note.media && note.media.length > 0 && <MediaChips refs={note.media} lib={(r) => (r.lib === "project" ? cut.id : "global")} onOpen={(r) => void window.slate?.reveal(r.file)} />}
         {note.target && <div className="mt-1 truncate text-[12px] text-soft">On {note.target.name}</div>}
         {note.against !== undefined && <div className="mt-1 text-[12px] text-dim">Compared with r{note.against}</div>}
         {note.moved && <div className="mt-1 text-[12px] text-dim">Moved with its layer from {tc(note.t)}</div>}
@@ -213,6 +216,7 @@ function CueCard({
           <div className="mt-2.5 grid gap-2">
             <textarea
               autoFocus
+              data-unsent={!!replyText.trim() || undefined}
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
               onKeyDown={(e) => {
@@ -425,6 +429,7 @@ export const Cues = forwardRef<
           </div>
           <textarea
             ref={input}
+            data-unsent={hasContent || undefined}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {

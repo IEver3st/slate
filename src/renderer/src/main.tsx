@@ -3,6 +3,7 @@ import { Tooltip } from "radix-ui";
 import "./styles.css";
 import { App } from "./App";
 import { installTheme } from "./lib/theme";
+import { installPresence } from "./lib/presence";
 
 for (const key of ["audio", "preferences", "token"]) {
   try {
@@ -13,6 +14,9 @@ for (const key of ["audio", "preferences", "token"]) {
 }
 
 installTheme();
+installPresence();
+
+for (const type of ["dragover", "drop"] as const) window.addEventListener(type, (e) => e.preventDefault());
 
 createRoot(document.getElementById("root")!).render(
   <Tooltip.Provider>

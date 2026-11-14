@@ -149,6 +149,7 @@ export function FixCheck({
           <div className="mt-2 flex gap-2">
             <textarea
               autoFocus
+              data-unsent={!!text.trim() || undefined}
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {

@@ -1,5 +1,6 @@
 import { app, Notification } from "electron";
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
 import { existsSync, readFileSync, unwatchFile, watchFile } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -25,6 +26,7 @@ export type UpdateState = {
   checking: boolean;
   lastCheck?: string;
   failure?: { short: string; step: string; error: string };
+  waiting?: string;
 };
 
 type Options = {
@@ -34,12 +36,15 @@ type Options = {
   icon: string;
   windowVisible: () => boolean;
   autoRestart: () => boolean;
-  beforeRestart: () => void;
+  holdReason: () => Promise<string | undefined>;
+  beforeRestart: (to: ReleaseInfo, auto: boolean) => Promise<boolean>;
   onChange: (state: UpdateState) => void;
 };
 
 const CHECK_EVERY = 2 * 60_000;
 const FIRST_CHECK = 15_000;
+const TRY_EVERY = 20_000;
+const QUIT_GRACE = 15_000;
 
 function readJson<T>(file: string): T | undefined {
   try {
@@ -58,6 +63,9 @@ export function createUpdater(o: Options) {
   const state: UpdateState = { enabled: !!running, running, checking: false };
   const announced = new Set<string>();
   let timer: ReturnType<typeof setInterval> | undefined;
+  let tryTimer: ReturnType<typeof setInterval> | undefined;
+  let trying = false;
+  let restarting = false;
 
   const emit = () => o.onChange({ ...state });
 
@@ -93,15 +101,37 @@ export function createUpdater(o: Options) {
     state.previous = ready ? undefined : releaseAt(current.previous);
     const changed = ready?.dir !== state.ready?.dir;
     state.ready = ready;
+    if (changed) state.waiting = undefined;
     if (changed) {
       if (ready) onReady(ready);
       emit();
     }
   }
 
+  async function tryAuto() {
+    if (trying || restarting || !state.ready) return;
+    if (!o.autoRestart()) {
+      if (state.waiting) {
+        state.waiting = undefined;
+        emit();
+      }
+      return;
+    }
+    trying = true;
+    const ready = state.ready;
+    const reason = await o.holdReason().catch(() => "Slate could not tell if it is busy");
+    trying = false;
+    if (state.ready?.dir !== ready.dir || !o.autoRestart()) return;
+    if (!reason) return apply(true);
+    if (state.waiting !== reason) {
+      state.waiting = reason;
+      emit();
+    }
+  }
+
   function onReady(ready: ReleaseInfo) {
-    if (!o.windowVisible() && o.autoRestart()) {
-      setTimeout(() => state.ready?.dir === ready.dir && !o.windowVisible() && o.autoRestart() && apply(), 3000);
+    if (o.autoRestart()) {
+      setTimeout(() => void tryAuto(), 3000);
       return;
     }
     if (announced.has(ready.dir) || !Notification.isSupported()) return;
@@ -141,11 +171,15 @@ export function createUpdater(o: Options) {
     emit();
   }
 
-  function apply() {
+  async function apply(auto = false) {
     const ready = state.ready;
-    if (!ready) return;
+    if (!ready || restarting) return;
+    restarting = true;
     const background = !o.windowVisible();
-    o.beforeRestart();
+    if (!(await o.beforeRestart(ready, auto).catch(() => true))) {
+      restarting = false;
+      return;
+    }
     if (ready.shellUpdate && ready.electron !== process.versions.electron && existsSync(join(ready.dir, "node_modules", "electron", "dist", "electron.exe"))) {
       const args = [join(ready.dir, "scripts", "install-windows.ts"), "--from-release", ready.dir, "--wait-pid", String(process.pid), "--launch", ...(background ? ["--background"] : [])];
       spawn(o.bun(), args, { cwd: ready.dir, detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } }).unref();
@@ -153,7 +187,20 @@ export function createUpdater(o: Options) {
       const args = process.argv.slice(1).filter((a) => a !== "--background");
       app.relaunch({ args: background ? [...args, "--background"] : args });
     }
+    killIfStuck();
+    setTimeout(() => app.exit(0), QUIT_GRACE).unref?.();
     app.quit();
+  }
+
+  function killIfStuck() {
+    if (process.platform !== "win32") return;
+    const started = new Date(Date.now() - process.uptime() * 1000).toISOString();
+    const script = `Start-Sleep -Seconds ${QUIT_GRACE / 1000 + 10}; $p = Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue; if ($p -and [Math]::Abs(($p.StartTime.ToUniversalTime() - [datetime]::Parse('${started}').ToUniversalTime()).TotalSeconds) -lt 10) { Stop-Process -Id ${process.pid} -Force }`;
+    try {
+      spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { cwd: tmpdir(), detached: true, stdio: "ignore", windowsHide: true })
+        .on("error", () => {})
+        .unref();
+    } catch {}
   }
 
   async function rollback() {
@@ -170,9 +217,11 @@ export function createUpdater(o: Options) {
     readCurrent();
     setTimeout(() => void check(), FIRST_CHECK);
     timer = setInterval(() => void check(), CHECK_EVERY);
+    tryTimer = setInterval(() => void tryAuto(), TRY_EVERY);
     app.on("will-quit", () => {
       unwatchFile(currentFile);
       if (timer) clearInterval(timer);
+      if (tryTimer) clearInterval(tryTimer);
     });
   }
 
@@ -181,7 +230,7 @@ export function createUpdater(o: Options) {
     check,
     apply,
     rollback,
-    windowHidden: () => state.ready && o.autoRestart() && apply(),
+    windowHidden: () => void tryAuto(),
     state: () => ({ ...state }),
     logFile,
   };

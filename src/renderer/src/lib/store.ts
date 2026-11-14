@@ -25,7 +25,7 @@ export function useCuts() {
     void refreshLibrary();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = onEvent((e) => {
-      if (e.type === "ping" || e.type === "hello") return;
+      if (e.type === "ping" || e.type === "hello" || e.type === "media") return;
       if (e.type === "library") void refreshLibrary();
       clearTimeout(timer);
       timer = setTimeout(() => void refresh(), 200);
@@ -58,7 +58,7 @@ export function useCut(cutId: string, rev?: number) {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = onEvent((e) => {
-      if (e.type === "ping" || e.type === "hello") return;
+      if (e.type === "ping" || e.type === "hello" || e.type === "media") return;
       if (e.cutId && e.cutId !== cutId) return;
       clearTimeout(timer);
       timer = setTimeout(() => void refresh(), e.type === "render" ? 350 : 80);
@@ -82,7 +82,7 @@ export function useActivity(limit = 80) {
     void load();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const off = onEvent((e) => {
-      if (e.type === "ping" || e.type === "hello" || e.type === "render") return;
+      if (e.type === "ping" || e.type === "hello" || e.type === "render" || e.type === "media") return;
       clearTimeout(timer);
       timer = setTimeout(load, 300);
     });

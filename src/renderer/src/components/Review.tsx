@@ -22,6 +22,10 @@ import { Mark } from "./Mark";
 import { openSettings } from "./Settings";
 import { ExportControl } from "./Export";
 import { preferences, usePreference } from "@/lib/preferences";
+import { MediaPanel } from "./Media";
+import { setActive, trackTarget } from "@/lib/presence";
+import { addTransfer, aspectOf, currentDrag, isExternal, isInternal, readDrag, stopPlay, thumbUrl, type DragItem } from "@/lib/medialib";
+import type { MediaItem, MediaListing, Placement } from "@/lib/api";
 
 type ToastAction = { label: string; run: () => void };
 type Toast = { id: number; text: string; tone?: "error"; action?: ToastAction };
@@ -34,6 +38,36 @@ function useToasts() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 9000 : tone === "error" ? 7000 : 3800);
   }, []);
   return { toasts, push };
+}
+
+async function decoded(src: string) {
+  try {
+    const img = new Image();
+    img.src = src;
+    await img.decode();
+    return img.naturalWidth && img.naturalHeight ? img : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function DropGhost({ hint, placement, at }: { hint: { point: [number, number]; item?: DragItem }; placement?: Placement; at: number }) {
+  const label = hint.item ? `Cue at ${tc(at)} with ${hint.item.name}` : `Add to this project and cue at ${tc(at)}`;
+  return (
+    <div className="pointer-events-none absolute inset-0 bg-ink/25">
+      {placement && (
+        <div
+          className="absolute overflow-hidden rounded-md shadow-[0_0_0_2px_var(--color-amber),0_10px_30px_rgba(0,0,0,.45)]"
+          style={{ left: `${placement.x * 100}%`, top: `${placement.y * 100}%`, width: `${placement.w * 100}%`, height: `${placement.h * 100}%` }}
+        >
+          {hint.item?.thumb && <img src={hint.item.thumb} className="size-full object-contain opacity-90" draggable={false} />}
+        </div>
+      )}
+      <div className="absolute inset-x-0 bottom-4 flex justify-center">
+        <span className="rounded-lg bg-ink/90 px-3 py-1.5 text-[13px] font-semibold text-amber">{label}</span>
+      </div>
+    </div>
+  );
 }
 
 function SafeZones() {
@@ -151,6 +185,12 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     return c;
   }, []);
   const playing = usePlayerSelect(controller, (s) => s.playing);
+  useEffect(() => {
+    if (playing) stopPlay();
+    setActive("play", playing ? "a cut is playing" : undefined);
+  }, [playing]);
+  useEffect(() => () => setActive("play", undefined), []);
+  useEffect(() => stopPlay, []);
   const rate = usePlayerSelect(controller, (s) => s.rate);
   const loop = usePlayerSelect(controller, (s) => s.loop);
   const durationMs = usePlayerSelect(controller, (s) => s.durationMs);
@@ -171,6 +211,7 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
   const [picker, setPicker] = useState<{ x: number; y: number; t: number; layers?: ContextLayer[] }>();
   const [fix, setFix] = useState<{ ids: string[]; i: number; resolved: number; reopened: number; skipped: number; replying: boolean }>();
   const composer = useRef<ComposerHandle>(null);
+  const [dropHint, setDropHint] = useState<{ point: [number, number]; item?: DragItem }>();
   const stage = useRef<HTMLDivElement>(null);
   const { toasts, push } = useToasts();
   const loopCut = usePreference("loopCut");
@@ -282,7 +323,116 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     [controller, pending, target],
   );
 
+  const placementFor = useCallback(
+    (aspect: number, point: [number, number] = [0.5, 0.5]): Placement => {
+      const W = cut?.latest?.width ?? 1080;
+      const H = cut?.latest?.height ?? 1920;
+      let bw = Math.sqrt(0.16 * W * H * aspect);
+      let bh = bw / aspect;
+      const k = Math.min(1, (0.9 * W) / bw, (0.9 * H) / bh);
+      bw *= k;
+      bh *= k;
+      const w = bw / W;
+      const h = bh / H;
+      const clamp = (v: number, hi: number) => Math.max(0, Math.min(hi, v));
+      return { x: clamp(point[0] - w / 2, 1 - w), y: clamp(point[1] - h / 2, 1 - h), w, h };
+    },
+    [cut?.latest?.width, cut?.latest?.height],
+  );
+
+  const composite = useCallback(
+    async (img: HTMLImageElement | undefined, p: Placement) => {
+      const v = controller.video;
+      if (!v || !v.videoWidth) return undefined;
+      const c = document.createElement("canvas");
+      c.width = v.videoWidth;
+      c.height = v.videoHeight;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(v, 0, 0);
+      if (img) {
+        try {
+          const s = Math.min((p.w * c.width) / img.naturalWidth, (p.h * c.height) / img.naturalHeight);
+          const dw = img.naturalWidth * s;
+          const dh = img.naturalHeight * s;
+          ctx.globalAlpha = 0.92;
+          ctx.drawImage(img, p.x * c.width + (p.w * c.width - dw) / 2, p.y * c.height + (p.h * c.height - dh) / 2, dw, dh);
+          ctx.globalAlpha = 1;
+        } catch {}
+      }
+      drawAnnotations(ctx, [{ kind: "rect", ...p }], c.width, c.height);
+      try {
+        return c.toDataURL("image/png");
+      } catch {
+        return undefined;
+      }
+    },
+    [controller],
+  );
+
+  const cueMedia = useCallback(
+    async (m: DragItem, point?: [number, number]) => {
+      if (!cut) return;
+      controller.pause();
+      const key = loop ? `${Math.round(loop.in)}-${Math.round(loop.out)}` : undefined;
+      const range = loop && key !== rangeOff && !fix ? loop : undefined;
+      const t = Math.round(range ? range.in : controller.state.time);
+      const visual = m.kind !== "audio";
+      const img = visual && m.thumb ? await decoded(m.thumb) : undefined;
+      const placement = visual ? placementFor(img ? img.naturalWidth / img.naturalHeight : (m.aspect ?? 1), point) : undefined;
+      const verb = m.kind === "audio" ? "Play" : "Add";
+      try {
+        const n = await api<Note>(`/api/cuts/${cut.id}/notes`, {
+          body: {
+            t,
+            end: range ? Math.round(range.out) : undefined,
+            rev: cut.rev,
+            text: `${verb} "${m.name}" here`,
+            annotations: placement ? [{ kind: "rect", ...placement }] : [],
+            annotatedFrame: placement ? await composite(img, placement) : undefined,
+            media: [{ lib: m.lib, path: m.path, placement }],
+          },
+        });
+        setSelectedNote(n.id);
+        push(`Cue at ${tc(t)} with ${m.name}`, undefined, { label: "Open cue", run: () => setTab("cues") });
+      } catch (e) {
+        push(e instanceof Error ? e.message : String(e), "error");
+      }
+    },
+    [cut, controller, loop, rangeOff, fix, placementFor, composite, push],
+  );
+
+  const cueItem = useCallback(
+    (it: MediaItem, point?: [number, number]) => void cueMedia({ lib: it.lib, path: it.path, name: it.name, kind: it.kind, aspect: aspectOf(it), thumb: thumbUrl(it) }, point),
+    [cueMedia],
+  );
+
+  const dropOnFrame = useCallback(
+    async (e: React.DragEvent<HTMLDivElement>) => {
+      if (!cut) return;
+      const r = e.currentTarget.getBoundingClientRect();
+      const point: [number, number] = [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+      const internal = readDrag(e.dataTransfer);
+      if (internal?.some((i) => i.folder)) return;
+      if (internal?.length) return void cueMedia(internal[0], point);
+      try {
+        const added = await addTransfer(cut.id, "", e.dataTransfer);
+        const first = added?.added[0];
+        if (!first) return push("Drop an image, GIF, clip or sound", "error");
+        const listing = await api<MediaListing>(`/api/media?lib=${cut.id}`);
+        const it = listing.items.find((i) => i.path === first);
+        if (it) cueItem(it, point);
+      } catch (err) {
+        push(err instanceof Error ? err.message : String(err), "error");
+      }
+    },
+    [cut, cueMedia, cueItem, push],
+  );
+
   const viewingRev = cut ? (cut.rev ?? cut.revisions.at(-1)?.n) : undefined;
+  useEffect(() => {
+    trackTarget(() => ({ cutId, rev: viewRev, t: Math.round(controller.state.time), tab }));
+    return () => trackTarget(undefined);
+  }, [cutId, viewRev, tab, controller]);
   const diff = useDiff(cutId, compare ? viewingRev : undefined, compare?.rev);
   const checks = useChecks(cutId, viewingRev);
   const peaks = usePeaks(cutId, viewingRev);
@@ -725,7 +875,26 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                 overlay={
                   <>
                     {safe && <SafeZones />}
-                    <div className="absolute inset-0" onPointerDown={(e) => e.altKey && (e.preventDefault(), openPicker(e))}>
+                    <div
+                      data-frame-drop
+                      className="absolute inset-0"
+                      onPointerDown={(e) => e.altKey && (e.preventDefault(), openPicker(e))}
+                      onDragOver={(e) => {
+                        if ((!isInternal(e.dataTransfer) && !isExternal(e.dataTransfer)) || currentDrag()?.some((i) => i.folder)) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "copy";
+                        const r = e.currentTarget.getBoundingClientRect();
+                        const point: [number, number] = [Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)), Math.max(0, Math.min(1, (e.clientY - r.top) / r.height))];
+                        setDropHint({ point, item: currentDrag()?.[0] });
+                      }}
+                      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setDropHint(undefined)}
+                      onDrop={(e) => {
+                        if (!isInternal(e.dataTransfer) && !isExternal(e.dataTransfer)) return;
+                        e.preventDefault();
+                        setDropHint(undefined);
+                        void dropOnFrame(e);
+                      }}
+                    >
                     <Sketch
                       tool={tool}
                       pending={pending}
@@ -737,6 +906,7 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                         composer.current?.focus();
                       }}
                     />
+                    {dropHint && <DropGhost hint={dropHint} placement={dropHint.item && dropHint.item.kind !== "audio" ? placementFor(dropHint.item.aspect ?? 1, dropHint.point) : undefined} at={noteRange ? noteRange.in : time} />}
                     </div>
                   </>
                 }
@@ -833,6 +1003,7 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                 Cues
               </Tab>
               <Tab value="layers">Layers</Tab>
+              <Tab value="media">Media</Tab>
               <Tab value="history" count={cut.revisions.length}>
                 History
               </Tab>
@@ -876,6 +1047,9 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
             </TabsContent>
             <TabsContent value="layers" className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
               <Inspector cut={cut} time={time} paused={!playing} selected={selectedItem} onEdit={(r) => void edit(r)} onNoteLayer={(l) => chooseLayer(l, controller.state.time)} />
+            </TabsContent>
+            <TabsContent value="media" className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
+              <MediaPanel cutId={cut.id} cueLabel={playing ? "Cue at playhead" : `Cue at ${tc(noteRange ? noteRange.in : time)}`} onCue={(it) => cueItem(it)} toast={push} />
             </TabsContent>
             <TabsContent value="history" className="flex min-h-0 flex-1 flex-col data-[state=inactive]:hidden">
               {diff && (

@@ -13,6 +13,7 @@ export type SlateEvent =
   | { type: "focus"; cutId: string; t?: number; noteId?: string }
   | { type: "agent"; cutId: string; cut: string; name: string; state: string; text: string }
   | { type: "library" }
+  | { type: "media"; lib: string }
   | { type: "service" }
   | { type: "setup" };
 

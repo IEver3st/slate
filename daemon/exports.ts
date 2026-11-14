@@ -75,6 +75,10 @@ export class Exporter {
     writeJsonAtomic(this.historyFile(cut), { cut: cut.path, exports: list });
   }
 
+  busy() {
+    return !!this.current || this.queue.length > 0;
+  }
+
   stateFor(cut: Cut) {
     const all = [this.current, ...this.queue].filter((j): j is Job => !!j);
     const job = all.find((j) => j.cut.id === cut.id);

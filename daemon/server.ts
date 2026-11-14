@@ -23,6 +23,10 @@ import { owner, seeClient, updateSettings } from "./settings";
 import { setupReport } from "./setup";
 import { CACHE_CHOICES, SERVICE_DEFAULTS, SLOT_CHOICES, cacheUsage, serviceSettings, updateService } from "./service";
 import { CACHE_DIR, HOME_ID } from "./paths";
+import {
+  MIME_OF, MediaError, addBytes, addFiles, addUrl, defaultGlobalRoot, globalRoot, settledListing, itemAt, kindOf, listing, makeFolder, peaksFor as mediaPeaks, projectRoot, recycle, refOf, relocate, rewatch, MAX_BYTES as MEDIA_MAX_BYTES, renameEntry, thumbFor, transfer, MEDIA_GUIDE,
+  type MediaItem, type MediaRef,
+} from "./medialib";
 
 type Ctx = { registry: Registry; renderer: Renderer; exporter: Exporter; token: string; uiDir: () => string | undefined; startedAt: string; version: string };
 
@@ -120,7 +124,7 @@ export function cutDetail(ctx: Ctx, cut: Cut, rev?: number) {
     export: ctx.exporter.stateFor(cut),
     notes: cut.notes.map((n) => {
       const d = displayTime(n as any, doc);
-      return { ...n, displayT: d.t, moved: d.moved, anchorGone: d.gone, frame: n.frame ? `/api/cuts/${cut.id}/notes/${n.id}/frame` : undefined, annotatedFrame: n.annotatedFrame ? `/api/cuts/${cut.id}/notes/${n.id}/frame?marked=1` : undefined };
+      return { ...n, media: n.media?.map((m) => relocate(m, cut)), displayT: d.t, moved: d.moved, anchorGone: d.gone, frame: n.frame ? `/api/cuts/${cut.id}/notes/${n.id}/frame` : undefined, annotatedFrame: n.annotatedFrame ? `/api/cuts/${cut.id}/notes/${n.id}/frame?marked=1` : undefined };
     }),
     activity: cut.activity.slice(-200),
     collaborators: cut.collaborators,
@@ -178,6 +182,7 @@ function resolveCut(ctx: Ctx, idOrPath: string | null | undefined, open = false)
 export function startServer(ctx: Ctx, port: number) {
   return Bun.serve({
     port,
+    maxRequestBodySize: MEDIA_MAX_BYTES + 1024 * 1024,
     hostname: "127.0.0.1",
     idleTimeout: 0,
     async fetch(req, server) {
@@ -205,9 +210,19 @@ export function startServer(ctx: Ctx, port: number) {
       if (p === "/api/health") return json({ ok: true, app: "slate", version: ctx.version, pid: process.pid, home: HOME_ID, startedAt: ctx.startedAt, authed: token === ctx.token });
       if (token !== ctx.token) return fail(401, "missing or wrong token");
       seeClient(req.headers.get("x-slate-client"), req.headers.get("x-slate-t3") === "1");
+      if (p === "/api/busy") return json({ reasons: busyReasons(ctx) });
 
+      const agentCall = (p.startsWith("/api/agent/") && p !== "/api/agent/wait") || p === "/api/media/add";
+      if (agentCall) agentCalls++;
       try {
+        if (p === "/api/media/upload" && req.method === "POST") {
+          const lib = libRoot(ctx, url.searchParams.get("lib"));
+          const bytes = new Uint8Array(await req.arrayBuffer());
+          const rel = addBytes(lib.root, url.searchParams.get("folder") ?? "", url.searchParams.get("name") ?? "Pasted", req.headers.get("content-type") ?? "", bytes);
+          return json({ added: [rel] });
+        }
         const body: any = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => ({})) : {};
+        if (p === "/api/media" || p.startsWith("/api/media/")) return await mediaRoute(ctx, req, url, p.slice("/api/media".length), body);
         const segs = p.split("/").filter(Boolean);
 
         if (p === "/api/events") {
@@ -423,6 +438,7 @@ export function startServer(ctx: Ctx, port: number) {
                 tag: body.tag,
                 target: body.target,
                 against: body.against,
+                media: mediaRefs(ctx, cut, body.media),
               });
               if (!note.frame) {
                 const f = await frameFor(ctx, cut, note.t, note.rev).catch(() => undefined);
@@ -550,10 +566,22 @@ export function startServer(ctx: Ctx, port: number) {
         return fail(404, "unknown endpoint");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        return fail(400, msg);
+        return fail(e instanceof MediaError ? 422 : 400, msg);
+      } finally {
+        if (agentCall) agentCalls--;
       }
     },
   });
+}
+
+let agentCalls = 0;
+
+function busyReasons(ctx: Ctx) {
+  const reasons: string[] = [];
+  if (ctx.exporter.busy()) reasons.push("an export is running");
+  if (ctx.renderer.rendering()) reasons.push("a revision is rendering");
+  if (agentCalls > 0) reasons.push("an agent is talking to Slate");
+  return reasons;
 }
 
 function serviceState(ctx: Ctx) {
@@ -569,6 +597,7 @@ function serviceState(ctx: Ctx) {
     choices: { cacheGb: CACHE_CHOICES, renderSlots: SLOT_CHOICES },
     roots,
     cache: { dir: CACHE_DIR, ...cacheUsage() },
+    media: { dir: globalRoot(), default: defaultGlobalRoot(), items: listing("global", globalRoot()).items.length },
     render: { resolution: RENDER_SETTINGS.resolution, fps: RENDER_SETTINGS.fps, segmentMs: RENDER_SETTINGS.segmentMs, encoder: RENDER_SETTINGS.encoder, cli: RENDER_SETTINGS.cli },
     version: ctx.version,
     startedAt: ctx.startedAt,
@@ -576,7 +605,14 @@ function serviceState(ctx: Ctx) {
 }
 
 async function serviceRoute(ctx: Ctx, sub: string, method: string, body: any) {
-  if (sub === "" && method === "POST") updateService(body);
+  if (sub === "" && method === "POST") {
+    const before = serviceSettings().mediaDir;
+    updateService(body);
+    if (serviceSettings().mediaDir !== before) {
+      rewatch("global", globalRoot());
+      emit({ type: "media", lib: "global" });
+    }
+  }
   else if (sub === "/roots" && method === "POST") {
     const roots = ctx.registry.roots;
     const add = typeof body.add === "string" && body.add.trim() ? resolve(body.add.trim()) : undefined;
@@ -589,4 +625,122 @@ async function serviceRoute(ctx: Ctx, sub: string, method: string, body: any) {
     return { ...serviceState(ctx), trimmed: r };
   }
   return serviceState(ctx);
+}
+
+type Lib = { lib: string; root: string; scope: "global" | "project"; cut?: Cut };
+
+function libRoot(ctx: Ctx, raw: unknown): Lib {
+  const lib = typeof raw === "string" ? raw.trim() : "";
+  if (!lib || lib === "global") return { lib: "global", root: globalRoot(), scope: "global" };
+  const cut = resolveCut(ctx, lib, true);
+  if (!cut) throw new MediaError(`unknown project: ${lib}. Call slate_open first.`);
+  return { lib: cut.id, root: projectRoot(cut.dataDir), scope: "project", cut };
+}
+
+function mediaRefs(ctx: Ctx, cut: Cut, raw: unknown): MediaRef[] | undefined {
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  return raw.slice(0, 12).map((r: any) => {
+    const lib = libRoot(ctx, r?.lib === "global" ? "global" : cut.id);
+    return refOf(itemAt(lib.lib, lib.root, String(r?.path ?? "")), lib.scope, r?.placement);
+  });
+}
+
+function forAgent(it: MediaItem, scope: "global" | "project") {
+  return {
+    scope,
+    file: it.file,
+    name: it.name,
+    folder: it.folder || undefined,
+    kind: it.kind,
+    format: it.ext,
+    size: it.width && it.height ? `${it.width}x${it.height}` : undefined,
+    durationMs: it.durationMs,
+    animated: it.animated || undefined,
+    transparent: it.alpha || undefined,
+  };
+}
+
+async function mediaRoute(ctx: Ctx, req: Request, url: URL, sub: string, body: any): Promise<Response> {
+  const q = (k: string) => url.searchParams.get(k);
+  if (sub === "" && req.method === "GET") {
+    const lib = libRoot(ctx, q("lib"));
+    return json({ ...listing(lib.lib, lib.root), scope: lib.scope });
+  }
+  if (sub === "/thumb" || sub === "/file" || sub === "/peaks") {
+    const lib = libRoot(ctx, q("lib"));
+    const it = itemAt(lib.lib, lib.root, q("path") ?? "");
+    if (sub === "/peaks") return json({ peaks: await mediaPeaks(it) });
+    if (sub === "/file") return serveFile(req, it.file, MIME_OF[`.${it.ext}`], "no-cache");
+    const f = await thumbFor(it);
+    if (!f) return fail(404, "no preview for this file");
+    return serveFile(req, f, f === it.file ? MIME_OF[`.${it.ext}`] : f.endsWith(".jpg") ? "image/jpeg" : "image/png", q("v") ? "immutable" : "no-cache");
+  }
+  if (req.method !== "POST") return fail(404, "unknown media endpoint");
+  if (sub === "/import") {
+    const lib = libRoot(ctx, body.lib);
+    const paths: string[] = Array.isArray(body.paths) ? body.paths.map(String) : [];
+    return json(addFiles(lib.root, String(body.folder ?? ""), paths));
+  }
+  if (sub === "/url") {
+    const lib = libRoot(ctx, body.lib);
+    return json({ added: [await addUrl(lib.root, String(body.folder ?? ""), String(body.url ?? ""), body.name ? String(body.name) : undefined)] });
+  }
+  if (sub === "/folder") {
+    const lib = libRoot(ctx, body.lib);
+    return json({ path: makeFolder(lib.root, String(body.parent ?? ""), String(body.name ?? "")) });
+  }
+  if (sub === "/rename") {
+    const lib = libRoot(ctx, body.lib);
+    return json({ path: renameEntry(lib.root, String(body.path ?? ""), String(body.name ?? "")) });
+  }
+  if (sub === "/move") {
+    const to = libRoot(ctx, body.to?.lib);
+    const from = (Array.isArray(body.items) ? body.items : []).map((i: any) => ({ root: libRoot(ctx, i?.lib).root, rel: String(i?.path ?? "") }));
+    return json({ paths: transfer(from, { root: to.root, folder: String(body.to?.folder ?? "") }, !!body.copy) });
+  }
+  if (sub === "/recycle") {
+    const lib = libRoot(ctx, body.lib);
+    return json({ recycled: await recycle(lib.root, Array.isArray(body.paths) ? body.paths.map(String) : []) });
+  }
+  if (sub === "/find") {
+    const scope = ["project", "global", "all"].includes(body.scope) ? body.scope : "all";
+    const terms = String(body.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    const folder = String(body.folder ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").toLowerCase();
+    const libs: Lib[] = [];
+    if (scope !== "global" && body.cut) libs.push(libRoot(ctx, body.cut));
+    if (scope !== "project") libs.push(libRoot(ctx, "global"));
+    if (!libs.length) throw new MediaError("pass cut to read a project's media");
+    const listed = await Promise.all(libs.map((l) => settledListing(l.lib, l.root)));
+    const out = libs.map((l, n) => {
+      const all = listed[n];
+      const items = all.items
+        .filter((i) => !body.kind || i.kind === body.kind)
+        .filter((i) => !folder || i.folder.toLowerCase() === folder || i.folder.toLowerCase().startsWith(folder + "/"))
+        .filter((i) => terms.every((t) => `${i.name} ${i.folder}`.toLowerCase().includes(t)));
+      return {
+        scope: l.scope,
+        root: l.root,
+        folders: all.folders.map((f) => ({ path: f.path, items: f.count })),
+        items: items.slice(0, 300).map((i) => forAgent(i, l.scope)),
+        more: items.length > 300 ? items.length - 300 : undefined,
+      };
+    });
+    return json({ libraries: out, howToUse: MEDIA_GUIDE });
+  }
+  if (sub === "/add") {
+    if (body.scope !== "global" && !body.cut) throw new MediaError("pass cut to save into a project, or scope global");
+    const lib = libRoot(ctx, body.scope === "global" ? "global" : body.cut);
+    const folder = String(body.folder ?? "").replace(/\\/g, "/");
+    let rels: string[] = [];
+    if (body.url) rels = [await addUrl(lib.root, folder, String(body.url), body.name ? String(body.name) : undefined)];
+    else if (body.path) {
+      const src = resolve(String(body.path));
+      if (!kindOf(src) && !(existsSync(src) && statSync(src).isDirectory())) throw new MediaError("only images, video, sound or a folder of them can be added");
+      rels = addFiles(lib.root, folder, [src]).added;
+      if (body.name && rels.length === 1) rels = [renameEntry(lib.root, rels[0], String(body.name))];
+    } else throw new MediaError("pass path or url");
+    const items = (await settledListing(lib.lib, lib.root)).items.filter((i) => rels.includes(i.path));
+    return json({ added: items.map((i) => forAgent(i, lib.scope)) });
+  }
+  return fail(404, "unknown media endpoint");
 }

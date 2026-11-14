@@ -67,12 +67,13 @@ function useShown() {
   );
 }
 
-type ServiceSettings = { cacheGb: number; renderSlots: number };
+type ServiceSettings = { cacheGb: number; renderSlots: number; mediaDir?: string };
 type ServiceState = {
   settings: ServiceSettings;
   defaults: ServiceSettings;
   choices: { cacheGb: number[]; renderSlots: number[] };
   roots: { path: string; exists: boolean; projects: number }[];
+  media: { dir: string; default: string; items: number };
   cache: {
     dir: string;
     total: number;
@@ -779,6 +780,35 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
       });
 
       add({
+        id: "mediaDir",
+        page: "folders",
+        section: "Media library",
+        title: "Global media folder",
+        description: `${s.media.dir}. ${s.media.items === 1 ? "1 file" : `${s.media.items} files`}. Every project and agent can use what's here; each project keeps its own media next to its cut.`,
+        keywords: "memes stickers sounds gifs library media folder",
+        control: (
+          <div className="flex items-center gap-1">
+            <IconButton label="Show in Explorer" onClick={() => void window.slate?.openFolder?.(s.media.dir)}>
+              <FolderOpen />
+            </IconButton>
+            {s.settings.mediaDir && (
+              <Button variant="ghost" onClick={() => void service.call("", { mediaDir: null })}>
+                Use default
+              </Button>
+            )}
+            <Button
+              onClick={async () => {
+                const dir = await window.slate?.pickFolder?.();
+                if (dir) void service.call("", { mediaDir: dir });
+              }}
+            >
+              Change
+            </Button>
+          </div>
+        ),
+      });
+
+      add({
         id: "renderSlots",
         page: "rendering",
         section: "Renders",
@@ -906,7 +936,7 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         section: "Updates",
         title: ready ? `${ready.short} is ready` : failure ? `${failure.short} did not build` : "Up to date",
         description: ready
-          ? `${ready.subject}. Restart to switch over.`
+          ? `${ready.subject}. ${!p.autoRestart ? "Restart to switch over." : updates.waiting ? `Installs by itself, waiting because ${updates.waiting}.` : "Installs by itself while Slate is idle."}`
           : failure
             ? `Failed at ${failure.step}. Still running ${running.short}.`
             : `Follows GitHub main.${updates.lastCheck ? ` Checked ${ago(updates.lastCheck)}.` : ""}`,
@@ -925,11 +955,11 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         id: "autoRestart",
         page: "about",
         section: "Updates",
-        title: "Restart into updates",
-        description: "When an update is ready and the window is hidden, switch to it right away. Otherwise wait for Restart.",
-        keywords: "automatic update",
+        title: "Install updates by themselves",
+        description: "Switch to a new version once nothing is playing, rendering or exporting, no cue is half written, and you haven't touched Slate for 3 minutes. Slate reopens where you were.",
+        keywords: "automatic update restart idle hands-off",
         prefs: ["autoRestart"],
-        control: toggle("autoRestart", "Restart into updates"),
+        control: toggle("autoRestart", "Install updates by themselves"),
       });
       if (previous && !ready)
         add({

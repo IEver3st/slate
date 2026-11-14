@@ -1,10 +1,24 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 
 contextBridge.exposeInMainWorld("slate", {
   initialTheme: ipcRenderer.sendSync("slate:initialTheme"),
   connection: () => ipcRenderer.invoke("slate:connection"),
   takeNavigation: () => ipcRenderer.invoke("slate:takeNavigation"),
+  takeResume: () => ipcRenderer.invoke("slate:takeResume"),
+  onPresenceRequest: (fn: () => unknown) => {
+    const handler = (_e: unknown, id: number) => ipcRenderer.send("slate:presence", id, fn());
+    ipcRenderer.on("slate:presenceRequest", handler);
+    return () => ipcRenderer.off("slate:presenceRequest", handler);
+  },
   openFile: () => ipcRenderer.invoke("slate:openFile"),
+  openMedia: () => ipcRenderer.invoke("slate:openMedia"),
+  pathForFile: (file: File) => {
+    try {
+      return webUtils.getPathForFile(file) || undefined;
+    } catch {
+      return undefined;
+    }
+  },
   reveal: (path: string) => ipcRenderer.invoke("slate:reveal", path),
   openExternal: (url: string) => ipcRenderer.invoke("slate:openExternal", url),
   updateState: () => ipcRenderer.invoke("slate:updateState"),

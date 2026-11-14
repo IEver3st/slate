@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { justify, useWidth } from "@/lib/layout";
 import { ArrowLeft, Check, FolderOpen, Search, Settings as Gear, X } from "lucide-react";
 import { api, media, type CutSummary, type LibraryFile } from "@/lib/api";
 import { useActivity, useCuts } from "@/lib/store";
@@ -12,6 +13,7 @@ import { Mark } from "./Mark";
 import { UpdatePill } from "./UpdatePill";
 import { openSettings } from "./Settings";
 import { usePreference } from "@/lib/preferences";
+import { MediaShelf } from "./Media";
 
 export type OpenTarget = {
   cutId: string;
@@ -26,20 +28,6 @@ const SCRUB_FRAMES = 48;
 function short(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-function useWidth<T extends HTMLElement>() {
-  const ref = useRef<T>(null);
-  const [width, setWidth] = useState(0);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    setWidth(el.getBoundingClientRect().width);
-    const ro = new ResizeObserver(([e]) => setWidth(e.contentRect.width));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  return [ref, width] as const;
 }
 
 function RemoveButton({ onRemove, className }: { onRemove: () => void; className?: string }) {
@@ -78,26 +66,6 @@ type WallItem = {
   stack?: WallItem[];
   fallback?: string;
 };
-
-function rows(items: WallItem[], width: number, target: number, gap: number) {
-  const out: { items: WallItem[]; h: number }[] = [];
-  let row: WallItem[] = [];
-  let sum = 0;
-  for (const it of items) {
-    row.push(it);
-    sum += it.aspect;
-    if (sum * target + gap * (row.length - 1) >= width) {
-      out.push({
-        items: row,
-        h: Math.floor((width - gap * (row.length - 1) - row.length) / sum),
-      });
-      row = [];
-      sum = 0;
-    }
-  }
-  if (row.length) out.push({ items: row, h: target });
-  return out;
-}
 
 function filePoster(f: LibraryFile) {
   return f.poster === false ? undefined : media(`/api/library/poster?path=${encodeURIComponent(f.path)}&v=${Math.round(f.mtimeMs)}-${f.size}`);
@@ -268,7 +236,7 @@ function Wall({ items, large, busy, onPick, onRemove }: { items: WallItem[]; lar
   const [ref, width] = useWidth<HTMLDivElement>();
   const gap = large ? 22 : 16;
   const target = large ? (width > 1500 ? 400 : 340) : width > 1700 ? 250 : 214;
-  const laid = useMemo(() => (width ? rows(items, width, target, gap) : []), [items, width, target, gap]);
+  const laid = useMemo(() => (width ? justify(items, width, target, gap) : []), [items, width, target, gap]);
   return (
     <div ref={ref} className={cn("grid", large ? "gap-y-7" : "gap-y-6")}>
       {laid.map((row, i) => (
@@ -462,7 +430,7 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
                 e.currentTarget.blur();
               }
             }}
-            placeholder="Search projects"
+            placeholder="Search projects and media"
             className="h-full min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
           />
           {q && (
@@ -518,7 +486,8 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
               <Wall items={wall} busy={busy} onPick={choose} onRemove={(c) => void remove(c.id)} />
             </Section>
           )}
-          {terms.length > 0 && !fresh.length && !wall.length && <p className="mt-16 text-center text-soft">No projects match “{q.trim()}”.</p>}
+          {terms.length > 0 && !fresh.length && !wall.length && <p className="mt-16 mb-10 text-center text-soft">No projects match “{q.trim()}”.</p>}
+          {!folder && <MediaShelf q={q} />}
         </main>
         <Rail cuts={all} activity={activity} onOpen={onOpen} />
       </div>

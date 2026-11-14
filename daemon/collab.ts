@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { absoluteWindow, canonical, contextAt, editedValue, findLayer, isLayerHidden, layerWindow, walk, type Doc, type Layer } from "./doc";
 import { applyActions, findCli } from "./tsrct";
 import { emit } from "./events";
+import { MEDIA_GUIDE, relocate, type MediaRef } from "./medialib";
 import { owner } from "./settings";
 import { nowIso, describeChanges, sendable, type Cut } from "./cuts";
 import { NOTE_TAGS, type Annotation, type Author, type Note, type NoteStatus, type NoteTag, type NoteTarget, type Revision, type Suggestion } from "./types";
@@ -78,6 +79,7 @@ export function createNote(cut: Cut, input: {
   tag?: unknown;
   target?: unknown;
   against?: unknown;
+  media?: MediaRef[];
 }): Note {
   const rev = cut.revision(input.rev) ?? cut.latest;
   if (!rev) throw new Error("this cut has no revision yet");
@@ -102,6 +104,7 @@ export function createNote(cut: Cut, input: {
     tag: cleanTag(input.tag),
     target,
     against: Number.isInteger(against) && against !== rev.n && cut.revision(against) ? against : undefined,
+    media: input.media?.length ? input.media : undefined,
     thread: [],
     anchor: doc ? (target && targetAnchor(doc, target, input.t)) || anchorFor(doc, input.t) : undefined,
   };
@@ -558,9 +561,11 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
       actions: n.kind === "edit" ? n.actions : undefined,
       appliedToCut: n.kind === "edit" ? (n as any).applied !== false && !n.overwrittenIn : undefined,
       overwrittenInRevision: n.overwrittenIn,
+      media: n.media?.map((m) => relocate(m, cut)),
       thread: n.thread.map((t) => ({ by: t.author.name, text: t.text, status: t.status, rev: t.rev })),
     };
   });
+  const withMedia = notes.some((n) => n.media?.length);
   return {
     now,
     cut: cut.path,
@@ -573,6 +578,7 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
     guidance: notes.length
       ? "Address each note. A note with only a tag carries the tag sentence as its text. target names the layer the note is about. comparedWithRevision means the reviewer was comparing against that revision when writing it, so check what differs there. Edits marked appliedToCut are already in the project: fold them into your generator or source so your next build keeps them. Reply with slate_reply (status claimed/addressed/wontfix) and call slate_publish with addresses=[note ids] after committing."
       : "No open feedback.",
+    mediaGuide: withMedia ? MEDIA_GUIDE : undefined,
   };
 }
 

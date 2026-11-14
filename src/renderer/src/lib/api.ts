@@ -37,6 +37,7 @@ export type Note = {
   suggestion?: Suggestion;
   overwrittenIn?: number;
   applied?: boolean;
+  media?: MediaRef[];
   thread: ThreadEntry[];
   displayT: number;
   moved?: boolean;
@@ -139,6 +140,12 @@ export type Finding = { level: "error" | "warning" | "allowed"; rule: string; me
 export type Checks = { lint: "ready" | "running" | "missing" | "failed"; sound: "ready" | "waiting"; findings: Finding[] };
 export type Peaks = { binMs: number; seconds: (number[] | null)[] };
 export type LibraryFile = { path: string; name: string; folder: string; size: number; mtimeMs: number; registered?: boolean; id?: string; durationMs?: number; width?: number; height?: number; group?: string; poster?: boolean };
+export type MediaKind = "image" | "video" | "audio";
+export type MediaItem = { id: string; lib: string; path: string; file: string; name: string; ext: string; folder: string; kind: MediaKind; size: number; mtimeMs: number; sig: string; width?: number; height?: number; durationMs?: number; animated?: boolean; alpha?: boolean };
+export type MediaFolder = { path: string; name: string; count: number };
+export type MediaListing = { lib: string; root: string; scope: "global" | "project"; folders: MediaFolder[]; items: MediaItem[] };
+export type Placement = { x: number; y: number; w: number; h: number };
+export type MediaRef = { lib: "global" | "project"; path: string; file: string; sig?: string; missing?: boolean; name: string; kind: MediaKind; folder: string; width?: number; height?: number; durationMs?: number; placement?: Placement };
 export type ActivityItem = Activity & { cutId: string; cut: string };
 export type SlateEvent = { type: string; cutId?: string; [k: string]: unknown };
 export type AgentClient = { id: string; name: string; version?: string; t3?: boolean; firstAt: string; lastAt: string };
