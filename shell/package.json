@@ -1,0 +1,7 @@
+{
+  "name": "slate",
+  "productName": "Slate",
+  "description": "Review room for agent-made Tesseract videos",
+  "type": "module",
+  "main": "main.js"
+}

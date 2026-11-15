@@ -64,7 +64,7 @@ if (!server) {
 }
 if (server.port !== firstPort) {
   const rival = await fetch(`http://127.0.0.1:${firstPort}/api/health`, { signal: AbortSignal.timeout(800) })
-    .then((r) => r.json())
+    .then((r) => r.json() as Promise<{ app?: string; home?: string }>)
     .catch(() => undefined);
   if (rival?.app === "slate" && rival.home === HOME_ID) {
     console.log(`[slate] another daemon holds ${firstPort}; exiting`);

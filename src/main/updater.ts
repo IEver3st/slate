@@ -180,7 +180,7 @@ export function createUpdater(o: Options) {
       restarting = false;
       return;
     }
-    if (ready.shellUpdate && ready.electron !== process.versions.electron && existsSync(join(ready.dir, "node_modules", "electron", "dist", "electron.exe"))) {
+    if (ready.shellUpdate && ready.electron !== process.versions.electron && existsSync(join(ready.dir, "node_modules", "@electron", "packager", "package.json"))) {
       const args = [join(ready.dir, "scripts", "install-windows.ts"), "--from-release", ready.dir, "--wait-pid", String(process.pid), "--launch", ...(background ? ["--background"] : [])];
       spawn(o.bun(), args, { cwd: ready.dir, detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } }).unref();
     } else {
@@ -197,7 +197,7 @@ export function createUpdater(o: Options) {
     const started = new Date(Date.now() - process.uptime() * 1000).toISOString();
     const script = `Start-Sleep -Seconds ${QUIT_GRACE / 1000 + 10}; $p = Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue; if ($p -and [Math]::Abs(($p.StartTime.ToUniversalTime() - [datetime]::Parse('${started}').ToUniversalTime()).TotalSeconds) -lt 10) { Stop-Process -Id ${process.pid} -Force }`;
     try {
-      spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { cwd: tmpdir(), detached: true, stdio: "ignore", windowsHide: true })
+      spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { cwd: tmpdir(), detached: true, stdio: "ignore", windowsHide: true })
         .on("error", () => {})
         .unref();
     } catch {}

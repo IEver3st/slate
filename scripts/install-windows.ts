@@ -1,6 +1,6 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
-import * as ResEdit from "resedit";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { packager } from "@electron/packager";
 import { appHome, shellDir, slateHome } from "../src/home";
 import { legacyStillRunning, moveAgentConfigs, moveHome, moveLoginItem, removeLegacyShell, renamedCode, repointReleases } from "./migrate";
 
@@ -12,75 +12,15 @@ const option = (name: string) => {
 };
 
 const SOURCE = resolve(option("--from-release") ?? join(import.meta.dir, ".."));
-const DIST = join(SOURCE, "node_modules", "electron", "dist");
 const TARGET = shellDir();
 const STAGE = `${TARGET}.staging`;
 const OLD = `${TARGET}.old`;
 const MARKER = "slate-install.json";
 const pkg = JSON.parse(readFileSync(join(SOURCE, "package.json"), "utf8"));
 
-const LOADER = `import { app, dialog } from "electron";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-
-const releases = join(process.env.LOCALAPPDATA, "Slate", "releases");
-const read = (file) => {
-  try {
-    return JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    return undefined;
-  }
-};
-const usable = (dir) => dir && existsSync(join(dir, "out", "main", "index.js")) && read(join(dir, "package.json"))?.name === "slate";
-const current = read(join(releases, "current.json"));
-const dir = [current?.dir, current?.previous].find(usable);
-if (dir) {
-  await import(pathToFileURL(join(dir, "out", "main", "index.js")).href);
-} else {
-  await app.whenReady();
-  dialog.showErrorBox("Slate", "No production build of Slate was found in " + releases + ". Run \\"bun run deploy\\" in the Slate repo.");
-  app.exit(1);
-}
-`;
-
 function fail(message: string): never {
   console.error(message);
   process.exit(1);
-}
-
-function brandExecutable(source: string, dest: string) {
-  const exe = ResEdit.NtExecutable.from(readFileSync(source), { ignoreCert: true });
-  const res = ResEdit.NtExecutableResource.from(exe);
-  const [group] = ResEdit.Resource.IconGroupEntry.fromEntries(res.entries);
-  if (!group) fail("Could not find the icon resource in electron.exe.");
-  const icon = ResEdit.Data.IconFile.from(readFileSync(join(SOURCE, "resources", "icon.ico")));
-  ResEdit.Resource.IconGroupEntry.replaceIconsForResource(
-    res.entries,
-    group.id,
-    group.lang,
-    icon.icons.map((i) => i.data),
-  );
-  const [info] = ResEdit.Resource.VersionInfo.fromEntries(res.entries);
-  if (!info) fail("Could not find version info in electron.exe.");
-  const version = `${pkg.version}.0`;
-  for (const lang of info.getAllLanguagesForStringValues()) {
-    info.setStringValues(lang, {
-      ProductName: "Slate",
-      FileDescription: "Slate",
-      InternalName: "Slate",
-      OriginalFilename: "Slate.exe",
-      CompanyName: "Ever3st",
-      LegalCopyright: "",
-      FileVersion: version,
-      ProductVersion: version,
-    });
-  }
-  info.setFileVersion(version);
-  info.setProductVersion(version);
-  info.outputToResourceEntries(res.entries);
-  res.outputResource(exe);
-  writeFileSync(dest, Buffer.from(exe.generate()));
 }
 
 function alive(pid: number) {
@@ -97,7 +37,7 @@ async function waitFor(pid: number) {
   while (alive(pid) && Date.now() < until) await Bun.sleep(250);
 }
 
-async function swapInto(target: string, patience: number) {
+async function swapInto(shell: string, target: string, patience: number) {
   const until = Date.now() + patience;
   for (;;) {
     try {
@@ -105,9 +45,8 @@ async function swapInto(target: string, patience: number) {
         rmSync(OLD, { recursive: true, force: true });
         renameSync(target, OLD);
       }
-      renameSync(STAGE, target);
-      rmSync(OLD, { recursive: true, force: true });
-      return;
+      renameSync(shell, target);
+      break;
     } catch (e) {
       if (existsSync(OLD) && !existsSync(target)) renameSync(OLD, target);
       if (Date.now() > until) {
@@ -117,24 +56,46 @@ async function swapInto(target: string, patience: number) {
       await Bun.sleep(500);
     }
   }
+  for (const leftover of [STAGE, OLD]) {
+    try {
+      rmSync(leftover, { recursive: true, force: true });
+    } catch {}
+  }
 }
 
-function installShell() {
-  if (!existsSync(join(DIST, "electron.exe"))) fail(`Electron is missing at ${DIST}. Run bun install first.`);
+async function installShell() {
+  const electronPkg = join(SOURCE, "node_modules", "electron", "package.json");
+  if (!existsSync(electronPkg)) fail(`Electron is missing from ${SOURCE}. Run bun install first.`);
   if (existsSync(TARGET) && !existsSync(join(TARGET, MARKER))) fail(`${TARGET} exists and was not made by this installer. Move it away first.`);
-  const electronVersion = readFileSync(join(DIST, "version"), "utf8").trim();
+  const electronVersion: string = JSON.parse(readFileSync(electronPkg, "utf8")).version;
   rmSync(STAGE, { recursive: true, force: true });
-  cpSync(DIST, STAGE, {
-    recursive: true,
-    filter: (src) => !["electron.exe", "default_app.asar"].includes(basename(src).toLowerCase()),
-  });
-  brandExecutable(join(DIST, "electron.exe"), join(STAGE, "Slate.exe"));
-  const app = join(STAGE, "resources", "app");
-  mkdirSync(app, { recursive: true });
-  writeFileSync(join(app, "package.json"), JSON.stringify({ name: "slate", productName: "Slate", version: pkg.version, type: "module", main: "main.js" }, null, 2));
-  writeFileSync(join(app, "main.js"), LOADER);
-  writeFileSync(join(STAGE, MARKER), JSON.stringify({ electron: electronVersion, version: pkg.version, installedFrom: SOURCE, installedAt: new Date().toISOString() }, null, 2));
-  return electronVersion;
+  let shell: string | undefined;
+  try {
+    [shell] = await packager({
+      dir: join(SOURCE, "shell"),
+      out: STAGE,
+      tmpdir: false,
+      platform: "win32",
+      arch: process.arch === "arm64" ? "arm64" : "x64",
+      electronVersion,
+      name: "Slate",
+      executableName: "Slate",
+      appVersion: pkg.version,
+      buildVersion: `${pkg.version}.0`,
+      appCopyright: "Copyright (C) Ever3st",
+      icon: join(SOURCE, "resources", "icon.ico"),
+      win32metadata: { CompanyName: "Ever3st", FileDescription: "Slate", ProductName: "Slate", InternalName: "Slate", OriginalFilename: "Slate.exe" },
+    });
+  } catch (e) {
+    rmSync(STAGE, { recursive: true, force: true });
+    fail(`Packaging the Slate app shell failed: ${e instanceof Error ? e.message : e}`);
+  }
+  if (!shell) {
+    rmSync(STAGE, { recursive: true, force: true });
+    fail("Packaging the Slate app shell produced nothing.");
+  }
+  writeFileSync(join(shell, MARKER), JSON.stringify({ electron: electronVersion, version: pkg.version, installedFrom: SOURCE, installedAt: new Date().toISOString() }, null, 2));
+  return { electronVersion, shell };
 }
 
 if (process.platform !== "win32") fail("This installer is for Windows.");
@@ -147,7 +108,7 @@ const abort = (message: string): never => {
   fail(message);
 };
 if (!waitPid && (await legacyStillRunning())) fail("Dailies is still running. Quit it from the tray (Quit Dailies) and run this again. Nothing was changed.");
-const electronVersion = installShell();
+const { electronVersion, shell } = await installShell();
 if (waitPid) await waitFor(waitPid);
 
 const alreadyMoved = existsSync(slateHome());
@@ -165,7 +126,7 @@ try {
 } catch (e) {
   abort(e instanceof Error ? e.message : String(e));
 }
-await swapInto(TARGET, waitPid ? 30_000 : 10_000);
+await swapInto(shell, TARGET, waitPid ? 30_000 : 10_000);
 
 const exe = join(TARGET, "Slate.exe");
 const env = { ...process.env, ELECTRON_RUN_AS_NODE: undefined };
