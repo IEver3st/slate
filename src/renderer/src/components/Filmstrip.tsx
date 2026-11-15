@@ -242,7 +242,7 @@ export function Filmstrip({
   };
 
   const rule = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !e.shiftKey) return;
     e.stopPropagation();
     e.preventDefault();
     const x0 = e.clientX;
@@ -288,7 +288,7 @@ export function Filmstrip({
         <i className="mt-[3px] h-0.5 w-10 rounded-full bg-line opacity-0 transition-opacity group-hover/resize:opacity-100" />
       </div>
       <div />
-      <div className="relative h-[22px] cursor-text" onPointerDown={rule} title="Click to jump, drag to mark a range">
+      <div className="relative h-[22px] cursor-ew-resize" onPointerDown={rule} title="Click or drag to scrub. Shift-drag to loop a range">
         {Array.from({ length: seconds }, (_, s) => (
           <span key={s} className={cn("absolute top-0.5 text-[12px] font-semibold", changed.has(s) ? "text-amber" : "text-faint")} style={{ left: `calc(${pct(s * 1000)} + 4px)` }}>
             {String(s).padStart(2, "0")}

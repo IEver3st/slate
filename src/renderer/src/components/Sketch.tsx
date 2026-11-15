@@ -4,9 +4,12 @@ import { activeAccent } from "@/lib/theme";
 
 export type Tool = "rect" | "arrow" | "pen" | "pin" | "target";
 export type Box = { x: number; y: number; w: number; h: number };
+export type MarkRef = { note?: string; i: number };
+export type ShownMark = { note: string; i: number; a: Annotation };
 
-function Shape({ a, w, h, color = "var(--color-amber)", faded }: { a: Annotation; w: number; h: number; color?: string; faded?: boolean }) {
-  const sw = 3;
+export const markName = (a: Annotation) => (a.kind === "rect" ? "box" : a.kind === "arrow" ? "arrow" : a.kind === "pen" ? "drawing" : "pin");
+
+function Shape({ a, w, h, color = "var(--color-amber)", faded, sw = 3, pinR = 11 }: { a: Annotation; w: number; h: number; color?: string; faded?: boolean; sw?: number; pinR?: number }) {
   const common = { stroke: color, strokeWidth: sw, fill: "none", strokeLinecap: "round" as const, strokeLinejoin: "round" as const, opacity: faded ? 0.55 : 1 };
   if (a.kind === "rect") return <rect x={a.x * w} y={a.y * h} width={a.w * w} height={a.h * h} rx={6} {...common} />;
   if (a.kind === "pen") return <polyline points={a.points.map(([x, y]) => `${x * w},${y * h}`).join(" ")} {...common} />;
@@ -15,8 +18,8 @@ function Shape({ a, w, h, color = "var(--color-amber)", faded }: { a: Annotation
     const cy = a.y * h;
     return (
       <g opacity={faded ? 0.55 : 1}>
-        <circle cx={cx} cy={cy} r={11} fill={color} stroke="rgba(0,0,0,.35)" strokeWidth={1} />
-        <circle cx={cx} cy={cy} r={3.5} fill="var(--color-amber-ink)" />
+        <circle cx={cx} cy={cy} r={pinR} fill={color} stroke="rgba(0,0,0,.35)" strokeWidth={1} />
+        {pinR === 11 && <circle cx={cx} cy={cy} r={3.5} fill="var(--color-amber-ink)" />}
       </g>
     );
   }
@@ -36,7 +39,88 @@ function Shape({ a, w, h, color = "var(--color-amber)", faded }: { a: Annotation
   );
 }
 
-export function Sketch({ tool, pending, shown, onAdd, onPick, targetBox }: { tool?: Tool; pending: Annotation[]; shown: Annotation[]; onAdd: (a: Annotation) => void; onPick?: (at: { clientX: number; clientY: number }) => void; targetBox?: Box }) {
+function corner(a: Annotation, w: number, h: number): [number, number] {
+  if (a.kind === "rect") return [(a.x + a.w) * w, a.y * h];
+  if (a.kind === "pin") return [a.x * w + 14, a.y * h - 14];
+  if (a.kind === "arrow") {
+    const ang = Math.atan2((a.y2 - a.y1) * h, (a.x2 - a.x1) * w);
+    return [a.x2 * w + Math.cos(ang) * 16, a.y2 * h + Math.sin(ang) * 16];
+  }
+  return [Math.max(...a.points.map(([x]) => x)) * w + 8, Math.min(...a.points.map(([, y]) => y)) * h - 8];
+}
+
+function Mark({ a, w, h, faded, selected, drawing, onPick, onRemove }: { a: Annotation; w: number; h: number; faded?: boolean; selected: boolean; drawing: boolean; onPick: () => void; onRemove: () => void }) {
+  const [hover, setHover] = useState(false);
+  const [cx, cy] = corner(a, w, h);
+  const x = Math.max(12, Math.min(w - 12, cx));
+  const y = Math.max(12, Math.min(h - 12, cy));
+  const stop = (e: React.PointerEvent | React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  return (
+    <g>
+      {selected && <Shape a={a} w={w} h={h} color="rgba(0,0,0,.6)" sw={9} pinR={15} />}
+      <Shape a={a} w={w} h={h} faded={faded && !selected && !hover} sw={hover || selected ? 4 : 3} />
+      <g
+        style={{ pointerEvents: "visiblePainted", cursor: drawing ? "crosshair" : "pointer" }}
+        onPointerEnter={() => setHover(true)}
+        onPointerLeave={() => setHover(false)}
+        onPointerDown={(e) => {
+          if (e.button !== 0 || drawing) return;
+          stop(e);
+          onPick();
+        }}
+        onClick={(e) => e.stopPropagation()}
+        onContextMenu={(e) => {
+          stop(e);
+          onRemove();
+        }}
+      >
+        <title>{drawing ? `Right-click to remove the ${markName(a)}` : `Click to select the ${markName(a)}, right-click to remove it`}</title>
+        <Shape a={a} w={w} h={h} color="transparent" sw={18} pinR={16} />
+      </g>
+      {selected && (
+        <g
+          transform={`translate(${x} ${y})`}
+          style={{ pointerEvents: "visiblePainted", cursor: "pointer" }}
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            stop(e);
+            onRemove();
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <title>{`Remove the ${markName(a)} (Delete)`}</title>
+          <circle r={11} fill="var(--color-raised)" stroke="rgba(0,0,0,.4)" strokeWidth={1} />
+          <path d="M-4 -4 L4 4 M4 -4 L-4 4" stroke="var(--color-text)" strokeWidth={1.8} strokeLinecap="round" />
+        </g>
+      )}
+    </g>
+  );
+}
+
+export function Sketch({
+  tool,
+  pending,
+  shown,
+  selected,
+  onAdd,
+  onPick,
+  onSelect,
+  onRemove,
+  targetBox,
+}: {
+  tool?: Tool;
+  pending: Annotation[];
+  shown: ShownMark[];
+  selected?: MarkRef;
+  onAdd: (a: Annotation) => void;
+  onPick?: (at: { clientX: number; clientY: number }) => void;
+  onSelect: (m?: MarkRef) => void;
+  onRemove: (m: MarkRef) => void;
+  targetBox?: Box;
+}) {
   const ref = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [draft, setDraft] = useState<Annotation>();
@@ -59,7 +143,8 @@ export function Sketch({ tool, pending, shown, onAdd, onPick, targetBox }: { too
   };
 
   const down = (e: React.PointerEvent) => {
-    if (!tool) return;
+    if (!tool || e.button !== 0) return;
+    if (selected) onSelect(undefined);
     e.preventDefault();
     e.stopPropagation();
     if (tool === "target") {
@@ -93,11 +178,12 @@ export function Sketch({ tool, pending, shown, onAdd, onPick, targetBox }: { too
 
   return (
     <svg ref={ref} className="size-full" style={{ cursor: tool ? "crosshair" : "default", pointerEvents: tool ? "auto" : "none" }} onPointerDown={down}>
-      {shown.map((a, i) => (
-        <Shape key={`s${i}`} a={a} w={size.w} h={size.h} faded />
-      ))}
+      {shown.map((m) => {
+        const r = { note: m.note, i: m.i };
+        return <Mark key={`s${m.note}-${m.i}`} a={m.a} w={size.w} h={size.h} faded drawing={!!tool} selected={selected?.note === m.note && selected.i === m.i} onPick={() => onSelect(r)} onRemove={() => onRemove(r)} />;
+      })}
       {pending.map((a, i) => (
-        <Shape key={`p${i}`} a={a} w={size.w} h={size.h} />
+        <Mark key={`p${i}`} a={a} w={size.w} h={size.h} drawing={!!tool} selected={!selected?.note && selected?.i === i} onPick={() => onSelect({ i })} onRemove={() => onRemove({ i })} />
       ))}
       {draft && <Shape a={draft} w={size.w} h={size.h} />}
       {targetBox && (

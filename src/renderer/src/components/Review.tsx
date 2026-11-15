@@ -13,7 +13,7 @@ import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/me
 import { Tabs, Tab, TabsContent, TabsList } from "./ui/tabs";
 import { Player, type CompareMode } from "./Player";
 import { VolumeControl } from "./Volume";
-import { Sketch, drawAnnotations, type Tool } from "./Sketch";
+import { Sketch, drawAnnotations, markName, type MarkRef, type ShownMark, type Tool } from "./Sketch";
 import { Filmstrip } from "./Filmstrip";
 import { Cues, type ComposerHandle } from "./Cues";
 import { Inspector, type EditRequest } from "./Inspector";
@@ -201,6 +201,7 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
   const [gutter, setGutter] = useState(PRESENCE_MIN);
   const [tool, setTool] = useState<Tool>();
   const [pending, setPending] = useState<Annotation[]>([]);
+  const [markSel, setMarkSel] = useState<MarkRef>();
   const [selectedNote, setSelectedNote] = useState<string>();
   const [selectedLayer, setSelectedLayer] = useState<number>();
   const [tab, setTab] = useState(() => start?.tab ?? new URL(location.href).searchParams.get("tab") ?? "cues");
@@ -283,14 +284,22 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
   }, [controller, cutId]);
 
   const cues = useMemo(() => [...(cut?.notes ?? [])].sort((a, b) => a.displayT - b.displayT || a.createdAt.localeCompare(b.createdAt)), [cut?.notes]);
-  const shown = useMemo(() => {
+  const shown = useMemo<ShownMark[]>(() => {
+    const marks = (n: Note) => n.annotations.map((a, i) => ({ note: n.id, i, a }));
     if (!playing && !tool) {
       const sel = cues.find((n) => n.id === selectedNote);
-      if (sel && Math.abs(sel.displayT - time) < 120) return sel.annotations;
-      return cues.filter((n) => n.annotations.length && Math.abs(n.displayT - time) < 1000 / FPS).flatMap((n) => n.annotations);
+      if (sel && Math.abs(sel.displayT - time) < 120) return marks(sel);
+      return cues.filter((n) => n.annotations.length && Math.abs(n.displayT - time) < 1000 / FPS).flatMap(marks);
     }
     return [];
   }, [cues, selectedNote, playing, time, tool]);
+  const liveSel = markSel && (markSel.note ? shown.some((m) => m.note === markSel.note && m.i === markSel.i) : markSel.i < pending.length) ? markSel : undefined;
+  useEffect(() => {
+    if (!liveSel) return;
+    const away = () => setMarkSel(undefined);
+    window.addEventListener("pointerdown", away);
+    return () => window.removeEventListener("pointerdown", away);
+  }, [liveSel]);
 
   const selectedItem: TrackItem | undefined = cut?.timeline.find((t) => t.id === selectedLayer);
 
@@ -308,8 +317,8 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
     [cut, push],
   );
 
-  const captureMarked = useCallback(
-    (extra: Annotation[] = []) => {
+  const captureWith = useCallback(
+    (list: Annotation[]) => {
       const v = controller.video;
       if (!v || !v.videoWidth) return undefined;
       const c = document.createElement("canvas");
@@ -317,10 +326,56 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
       c.height = v.videoHeight;
       const ctx = c.getContext("2d")!;
       ctx.drawImage(v, 0, 0);
-      drawAnnotations(ctx, [...extra, ...pending, ...(target?.box ? [{ kind: "rect" as const, ...target.box }] : [])], c.width, c.height);
+      drawAnnotations(ctx, list, c.width, c.height);
       return c.toDataURL("image/png");
     },
-    [controller, pending, target],
+    [controller],
+  );
+
+  const captureMarked = useCallback(
+    (extra: Annotation[] = []) => captureWith([...extra, ...pending, ...(target?.box ? [{ kind: "rect" as const, ...target.box }] : [])]),
+    [captureWith, pending, target],
+  );
+
+  const removeMark = useCallback(
+    async (ref: MarkRef) => {
+      setMarkSel(undefined);
+      if (!ref.note) {
+        const a = pending[ref.i];
+        if (!a) return;
+        setPending((p) => p.filter((_, i) => i !== ref.i));
+        let undone = false;
+        push(`Removed the ${markName(a)}`, undefined, {
+          label: "Undo",
+          run: () => {
+            if (undone) return;
+            undone = true;
+            setPending((p) => [...p.slice(0, ref.i), a, ...p.slice(ref.i)]);
+          },
+        });
+        return;
+      }
+      if (!cut) return;
+      const n = cut.notes.find((x) => x.id === ref.note);
+      const a = n?.annotations[ref.i];
+      if (!n || !a) return;
+      const save = (list: Annotation[]) => api(`/api/cuts/${cut.id}/notes/${n.id}`, { method: "PATCH", body: { annotations: list, annotatedFrame: list.length ? captureWith(list) : null } });
+      try {
+        await save(n.annotations.filter((_, i) => i !== ref.i));
+        let undone = false;
+        push(`Removed the ${markName(a)} from cue ${cues.findIndex((x) => x.id === n.id) + 1}`, undefined, {
+          label: "Undo",
+          run: () => {
+            if (undone) return;
+            undone = true;
+            void save(n.annotations).catch((e) => push(e instanceof Error ? e.message : String(e), "error"));
+          },
+        });
+      } catch (e) {
+        push(e instanceof Error ? e.message : String(e), "error");
+      }
+    },
+    [pending, cut, cues, captureWith, push],
   );
 
   const placementFor = useCallback(
@@ -645,6 +700,11 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement;
+      const inEmptyComposer = e.target instanceof HTMLTextAreaElement && e.target.dataset.composer !== undefined && !e.target.value;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z" && pending.length && (!typing || inEmptyComposer)) {
+        e.preventDefault();
+        return void removeMark({ i: pending.length - 1 });
+      }
       if (typing) return;
       const k = e.key.toLowerCase();
       if (e.target instanceof HTMLElement && e.target.getAttribute("role") === "slider" && /^(arrow|home|end|page)/.test(k)) return;
@@ -700,7 +760,20 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
         a: () => (controller.pause(), setTool((t) => (t === "arrow" ? undefined : "arrow"))),
         d: () => (controller.pause(), setTool((t) => (t === "pen" ? undefined : "pen"))),
         p: () => (controller.pause(), setTool((t) => (t === "pin" ? undefined : "pin"))),
-        escape: () => (tool ? setTool(undefined) : pending.length ? setPending([]) : target ? setTarget(undefined) : setSelectedLayer(undefined)),
+        escape: () =>
+          liveSel
+            ? setMarkSel(undefined)
+            : tool
+              ? setTool(undefined)
+              : pending.length
+                ? setPending([])
+                : target
+                  ? setTarget(undefined)
+                  : selectedLayer !== undefined
+                    ? setSelectedLayer(undefined)
+                    : loop && controller.setLoop(undefined),
+        delete: () => liveSel && void removeMark(liveSel),
+        backspace: () => liveSel && void removeMark(liveSel),
         "[": () => seekNote(-1),
         "]": () => seekNote(1),
         s: () => setSafe((v) => !v),
@@ -899,6 +972,12 @@ export function Review({ cutId, start, onBack }: { cutId: string; start?: { rev?
                       tool={tool}
                       pending={pending}
                       shown={shown}
+                      selected={liveSel}
+                      onSelect={(m) => {
+                        setMarkSel(m);
+                        if (m && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+                      }}
+                      onRemove={(m) => void removeMark(m)}
                       onPick={openPicker}
                       targetBox={target?.box}
                       onAdd={(a) => {

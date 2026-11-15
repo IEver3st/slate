@@ -27,6 +27,7 @@ export class PlayerController {
   private cmpAhead = 0;
   onTime?: (ms: number) => void;
   private loopAll = false;
+  private lastT = 0;
 
   subscribe = (fn: () => void) => {
     this.subs.add(fn);
@@ -92,8 +93,11 @@ export class PlayerController {
       if (this.video !== v) return;
       const t = meta.mediaTime * 1000;
       const loop = this.state.loop;
-      if (loop && this.state.playing && t >= loop.out) {
-        v.currentTime = loop.in / 1000;
+      const crossedOut = !!loop && this.state.playing && this.lastT < loop.out && t >= loop.out;
+      this.lastT = t;
+      if (crossedOut) {
+        v.currentTime = loop!.in / 1000;
+        this.lastT = loop!.in;
       }
       if (this.queuedSeek === undefined && !v.seeking) {
         this.state = { ...this.state, time: t };
@@ -141,8 +145,12 @@ export class PlayerController {
   play() {
     const v = this.video;
     if (!v) return;
-    if (this.state.loop && (v.currentTime * 1000 >= this.state.loop.out || v.currentTime * 1000 < this.state.loop.in)) v.currentTime = this.state.loop.in / 1000;
-    else if (v.ended || v.currentTime >= v.duration - 0.01) v.currentTime = 0;
+    const at = v.currentTime * 1000;
+    const loop = this.state.loop;
+    if (loop && at >= loop.out - 1000 / FPS && at < loop.out + 1000 / FPS) {
+      v.currentTime = loop.in / 1000;
+      this.lastT = loop.in;
+    } else if (v.ended || v.currentTime >= v.duration - 0.01) v.currentTime = 0;
     void v.play().catch(() => {});
   }
   pause() {
@@ -161,6 +169,7 @@ export class PlayerController {
     const d = this.state.durationMs || (v?.duration ?? 0) * 1000;
     const t = Math.max(0, Math.min(d ? d - 1000 / FPS / 2 : ms, ms));
     this.set({ time: t });
+    this.lastT = t;
     if (!v) return;
     if (v.seeking) this.queuedSeek = t;
     else v.currentTime = t / 1000;

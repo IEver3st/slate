@@ -180,7 +180,7 @@ function CueCard({
         {note.against !== undefined && <div className="mt-1 text-[12px] text-dim">Compared with r{note.against}</div>}
         {note.moved && <div className="mt-1 text-[12px] text-dim">Moved with its layer from {tc(note.t)}</div>}
         {note.anchorGone && <div className="mt-1 text-[12px] text-red">The layer this note was on is gone</div>}
-        {note.annotatedFrame && (selected || note.status === "draft") && <MarkedFrame path={note.annotatedFrame} />}
+        {note.annotatedFrame && (selected || note.status === "draft") && <MarkedFrame path={`${note.annotatedFrame}&v=${encodeURIComponent(note.updatedAt)}`} />}
         {note.thread.length > 0 && (
           <div className="mt-2 grid gap-1.5">
             {note.thread.map((t) => (
@@ -429,6 +429,7 @@ export const Cues = forwardRef<
           </div>
           <textarea
             ref={input}
+            data-composer
             data-unsent={hasContent || undefined}
             value={text}
             onChange={(e) => setText(e.target.value)}
