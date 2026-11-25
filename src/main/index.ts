@@ -520,7 +520,7 @@ async function onEvent(e: any) {
   if (e.type === "export" && e.state === "done" && typeof e.file === "string") {
     const file: string = e.file;
     const size = typeof e.bytes === "number" ? `${Math.round(e.bytes / 1e6)} MB, ` : "";
-    notify("sound", `Exported r${e.rev} of ${e.cut ?? "your cut"}`, `${size}4K60. Click to show it in Explorer.`, e.cutId, () => {
+    notify("sound", `Exported r${e.rev} of ${e.cut ?? "your cut"}`, `${size}${e.label ?? "4K60"}. Click to show it in Explorer.`, e.cutId, () => {
       if (existsSync(file)) shell.showItemInFolder(file);
     });
   }

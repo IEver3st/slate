@@ -59,17 +59,24 @@ async function ffmpeg(args: string[], input?: Uint8Array) {
   return r;
 }
 
+const HW_ENCODERS = ["h264_nvenc", "h264_amf", "h264_qsv"] as const;
+
+async function probeEncoder(enc: string): Promise<boolean> {
+  try {
+    const r = await run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=0.1", "-c:v", enc, "-f", "null", "-"], undefined, 4000);
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 let encoderProbe: Promise<string> | undefined;
 export function pickEncoder(): Promise<string> {
   encoderProbe ??= (async () => {
     if (process.env.SLATE_ENCODER) return process.env.SLATE_ENCODER;
     if (!FFMPEG_FOUND) return "libx264";
-    try {
-      const r = await run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30:d=0.2", "-c:v", "h264_amf", "-f", "null", "-"]);
-      return r.code === 0 ? "h264_amf" : "libx264";
-    } catch {
-      return "libx264";
-    }
+    const results = await Promise.all(HW_ENCODERS.map(async (enc) => ({ enc, ok: await probeEncoder(enc) })));
+    return results.find((r) => r.ok)?.enc ?? "libx264";
   })();
   return encoderProbe;
 }
@@ -156,7 +163,7 @@ export async function encodeMovie(video: string[], audio: (string | undefined)[]
   writeFileSync(list, video.map((f) => `file '${f.split(String.fromCharCode(92)).join("/")}'`).join(String.fromCharCode(10)));
   const tmp = `${outFile}.part.mp4`;
   try {
-    const args = ["-f", "concat", "-safe", "0", "-i", list, "-f", "s16le", "-ar", String(PCM_RATE), "-ac", String(PCM_CHANNELS), "-i", "pipe:0", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "flac", "-movflags", "+faststart", "-f", "mp4", tmp];
+    const args = ["-f", "concat", "-safe", "0", "-i", list, "-f", "s16le", "-ar", String(PCM_RATE), "-ac", String(PCM_CHANNELS), "-i", "pipe:0", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "flac", "-compression_level", "0", "-movflags", "+faststart", "-f", "mp4", tmp];
     const p = Bun.spawn([FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", ...args], { stdin: "pipe", stdout: "ignore", stderr: "pipe", windowsHide: true });
     const stderr = new Response(p.stderr).text();
     let writeError: unknown;
@@ -166,7 +173,7 @@ export async function encodeMovie(video: string[], audio: (string | undefined)[]
         const chunk = await next;
         if (i + 1 < audio.length) next = segmentPcm(audio[i + 1], Math.round((lengths[i + 1] * PCM_RATE) / 1000) * PCM_BYTES_PER_FRAME);
         p.stdin.write(chunk);
-        await p.stdin.flush();
+        if ((i & 7) === 7) await p.stdin.flush();
       }
       await p.stdin.end();
     } catch (e) {
@@ -195,7 +202,11 @@ export function makeBlank(width: number, height: number, ms: number, fps: number
       const frames = Math.max(1, Math.round((ms * fps) / 1000));
       const enc = encoder === "h264_amf"
         ? ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "speed", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21", "-bf", "0", "-forced_idr", "1"]
-        : ["-c:v", "libx264", "-preset", "veryfast", "-bf", "0"];
+        : encoder === "h264_nvenc"
+          ? ["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ull", "-rc", "constqp", "-qp", "20", "-bf", "0", "-forced-idr", "1"]
+          : encoder === "h264_qsv"
+            ? ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", "20", "-bf", "0"]
+            : ["-c:v", "libx264", "-preset", "veryfast", "-bf", "0"];
       const tmp = `${out}.part.mp4`;
       await ffmpeg(["-f", "lavfi", "-i", `color=c=0x16171a:s=${width}x${height}:r=${fps}`, "-frames:v", String(frames), ...enc, "-g", String(fps), "-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", tmp]);
       renameSync(tmp, out);
@@ -227,6 +238,58 @@ export async function extractThumb(segmentFile: string, outJpg: string, shortSid
     await ffmpeg(["-i", segmentFile, "-vf", `select=eq(n\\,0),${scale}`, "-fps_mode", "passthrough", "-frames:v", "1", "-q:v", "4", "-update", "1", tmp]);
     if (!existsSync(tmp)) throw new Error(`no thumbnail from ${segmentFile}`);
     renameSync(tmp, outJpg);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+export async function extractSpanThumbs(spanFile: string, workDir: string, fps: number, vkeys: string[], thumbDir: string, shortSide = THUMB_SHORT_SIDE) {
+  if (!vkeys.length) return;
+  const missing = vkeys.some((vk) => !existsSync(join(thumbDir, `${vk}-${shortSide}.jpg`)));
+  if (!missing) return;
+  const dir = join(workDir, "th");
+  mkdirSync(dir, { recursive: true });
+  const scale = `scale=w='if(gt(iw\\,ih)\\,-2\\,${shortSide})':h='if(gt(iw\\,ih)\\,${shortSide}\\,-2)':flags=bicubic`;
+  const step = Math.max(1, Math.round(fps));
+  try {
+    await ffmpeg(["-i", spanFile, "-vf", `select=not(mod(n\\,${step})),${scale}`, "-fps_mode", "passthrough", "-q:v", "4", join(dir, "%04d.jpg")]);
+    const files = readdirSync(dir).filter((f) => f.endsWith(".jpg")).sort();
+    for (let i = 0; i < Math.min(files.length, vkeys.length); i++) {
+      const dest = join(thumbDir, `${vkeys[i]}-${shortSide}.jpg`);
+      moveInto(join(dir, files[i]), dest);
+    }
+  } catch {}
+}
+
+function systemFontFile(): string | undefined {
+  for (const p of ["C:\\Windows\\Fonts\\segoeuib.ttf", "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf"]) {
+    if (existsSync(p)) return p.replace(/\\/g, "/").replace(":", "\\:");
+  }
+  return undefined;
+}
+
+export async function buildContactSheet(frames: { file: string; label: string }[], outPng: string, cols?: number) {
+  if (!frames.length) throw new Error("no frames to build contact sheet");
+  const n = frames.length;
+  const c = Math.max(1, Math.min(n, cols ?? (n <= 4 ? n : n <= 9 ? 3 : 4)));
+  const r = Math.ceil(n / c);
+  const tmp = `${outPng}.part.png`;
+  const font = systemFontFile();
+  const inputs = frames.flatMap((f) => ["-i", f.file]);
+  const filters: string[] = [];
+  frames.forEach((f, i) => {
+    const safeLabel = f.label.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    const draw = font
+      ? `,drawbox=x=0:y=0:w=iw:h=26:color=black@0.65:t=fill,drawtext=fontfile='${font}':text='${safeLabel}':x=8:y=5:fontsize=16:fontcolor=white`
+      : "";
+    filters.push(`[${i}:v]scale=w='if(gt(iw\\,ih)\\,360\\,-2)':h='if(gt(iw\\,ih)\\,-2\\,360)':flags=bicubic${draw}[t${i}]`);
+  });
+  const concatIn = frames.map((_, i) => `[t${i}]`).join("");
+  filters.push(`${concatIn}concat=n=${n}:v=1:a=0,tile=${c}x${r}:padding=6:margin=6:color=0x0f1b1d[out]`);
+  try {
+    await ffmpeg([...inputs, "-filter_complex", filters.join(";"), "-map", "[out]", "-frames:v", "1", "-update", "1", tmp]);
+    if (!existsSync(tmp)) throw new Error("contact sheet produced no output");
+    renameSync(tmp, outPng);
   } finally {
     rmSync(tmp, { force: true });
   }

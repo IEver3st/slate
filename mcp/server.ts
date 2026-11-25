@@ -182,8 +182,8 @@ const server = new McpServer(
   {
     instructions: [
       `Slate is ${WHOSE} review room for Tesseract (.tsrct) videos. It renders every saved revision of a cut with hardware playback, and ${WHO} leaves timestamped notes, frame drawings and direct edits there. Use it whenever you make or revise a .tsrct video ${WHO} will watch, instead of exporting drafts.`,
-      `Loop: slate_open the .tsrct when you start (${WHO} sees it live; read any open notes first), slate_status while you work, edit and save the project with the tsrct CLI as usual, then slate_publish with a one-line summary and the ids of the notes you addressed. Read feedback with slate_feedback, look at its frame and markedFrame PNGs, and answer notes with slate_reply.`,
-      `Edits ${WHO} made in Slate are already in the .tsrct: if the project is built from a generator script or config, fold them into it before rebuilding, or the rebuild reverts them. Never edit the .slate folder next to a cut. Use slate_frame instead of \`tsrct preview\`: it returns the frame exactly as Slate rendered it. slate_check reports what Slate can see on this PC.`,
+      `Loop: slate_open the .tsrct when you start (${WHO} sees it live; read any open notes or direct messages first), slate_status while you work (include optional progress 0..1 and step), edit and save the project with the tsrct CLI as usual, then slate_publish with a one-line summary and the ids of the notes you addressed. Read feedback with slate_feedback, look at its frame and markedFrame PNGs, and answer notes with slate_reply (supports single or batch replies).`,
+      `Edits ${WHO} made in Slate are already in the .tsrct: if the project is built from a generator script or config, fold them into it before rebuilding, or the rebuild reverts them. Never edit the .slate folder next to a cut. Use slate_frame or slate_contact_sheet (multi-frame grid with timecodes) instead of \`tsrct preview\`, and use slate_inspect to read timeline layers, automated cutlint/clipping checks, and revision diffs without unpacking the archive. slate_check reports what Slate can see on this PC.`,
       `${WHO} keeps memes, stickers, sound effects and clips in Slate's media library, per project and global. When a note has media, or a video needs a reaction, sticker or sound, look there with slate_media before searching the web; save finds worth keeping with slate_media_add.`,
       wake,
     ].join("\n\n"),
@@ -215,13 +215,20 @@ server.registerTool(
   "slate_status",
   {
     title: "Post your status",
-    description: `Tell ${WHO} what you are doing on a cut. state working queues their direct edits instead of writing the file under you; ready means a revision is worth watching; blocked means you need them.`,
-    inputSchema: { cut, state: z.enum(["working", "ready", "blocked", "idle"]), message: z.string().describe("One short line, e.g. 'retiming the hook to the beat'."), agent },
+    description: `Tell ${WHO} what you are doing on a cut. state working queues their direct edits instead of writing the file under you; ready means a revision is worth watching; blocked means you need them (they can answer you right inside Slate). Optional progress (0 to 1) and step show a live progress bar.`,
+    inputSchema: {
+      cut,
+      state: z.enum(["working", "ready", "blocked", "idle"]),
+      message: z.string().describe("One short line, e.g. 'retiming the hook to the beat'."),
+      progress: z.number().min(0).max(1).optional().describe("Optional progress fraction from 0 to 1."),
+      step: z.string().optional().describe("Optional short step badge, e.g. '3/5' or 'audio'."),
+      agent,
+    },
   },
-  ({ cut, state, message, agent: name }) =>
+  ({ cut, state, message, progress, step, agent: name }) =>
     guarded(async () => {
       const t = await thread();
-      return text(await call("/api/agent/status", { cut, state, message, agent: await agentName(name), thread: t.id, threadLink: t.link }));
+      return text(await call("/api/agent/status", { cut, state, message, progress, step, agent: await agentName(name), thread: t.id, threadLink: t.link }));
     }),
 );
 
@@ -274,11 +281,28 @@ server.registerTool(
 server.registerTool(
   "slate_reply",
   {
-    title: "Reply to a note",
-    description: "Answer a note in its thread. status claimed = you are on it; addressed = done (prefer slate_publish addresses for changes); wontfix = explain why not.",
-    inputSchema: { cut, note: z.string(), text: z.string(), status: z.enum(["claimed", "addressed", "wontfix"]).optional(), agent },
+    title: "Reply to one or more notes",
+    description: "Answer a note in its thread, or batch-reply to multiple notes at once via replies. status claimed = you are on it; addressed = done (prefer slate_publish addresses for changes); wontfix = explain why not.",
+    inputSchema: {
+      cut,
+      note: z.string().optional().describe("Note id for a single reply."),
+      text: z.string().optional().describe("Reply text for a single reply."),
+      status: z.enum(["claimed", "addressed", "wontfix"]).optional(),
+      replies: z
+        .array(
+          z.object({
+            note: z.string(),
+            text: z.string(),
+            status: z.enum(["claimed", "addressed", "wontfix"]).optional(),
+          }),
+        )
+        .optional()
+        .describe("Batch multiple note replies in one call."),
+      agent,
+    },
   },
-  ({ cut, note, text: body, status, agent: name }) => guarded(async () => text(await call("/api/agent/reply", { cut, note, text: body, status, agent: await agentName(name) }))),
+  ({ cut, note, text: body, status, replies, agent: name }) =>
+    guarded(async () => text(await call("/api/agent/reply", { cut, note, text: body, status, replies, agent: await agentName(name) }))),
 );
 
 server.registerTool(
@@ -290,6 +314,42 @@ server.registerTool(
     annotations: { readOnlyHint: true },
   },
   ({ cut, t, revision, exact }) => guarded(async () => text(await call("/api/agent/frame", { cut, t, revision, exact, agent: await agentName() }))),
+);
+
+server.registerTool(
+  "slate_contact_sheet",
+  {
+    title: "Get a multi-frame contact sheet",
+    description: "Stitched PNG grid of rendered frames across a cut or time range with burned-in timecodes, so you can visually check pacing, transitions, and framing in one image read.",
+    inputSchema: {
+      cut,
+      revision: z.number().int().optional(),
+      times: z.array(z.number()).max(16).optional().describe("Explicit timestamps in ms (up to 16)."),
+      fromMs: z.number().optional().describe("Start time in ms when sampling evenly (default 0)."),
+      toMs: z.number().optional().describe("End time in ms when sampling evenly (default cut duration)."),
+      count: z.number().int().min(2).max(16).optional().describe("Number of evenly spaced frames (default 6)."),
+      cols: z.number().int().min(1).max(6).optional().describe("Columns in the grid."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ cut, revision, times, fromMs, toMs, count, cols }) =>
+    guarded(async () => text(await call("/api/agent/sheet", { cut, revision, times, fromMs, toMs, count, cols, agent: await agentName() }))),
+);
+
+server.registerTool(
+  "slate_inspect",
+  {
+    title: "Inspect layers, checks and diff",
+    description: "Inspect a cut's timeline layers, optional visible layers at time t, automated cutlint/audio-clipping checks, and optional revision diff — in one fast call without unpacking the .tsrct.",
+    inputSchema: {
+      cut,
+      revision: z.number().int().optional().describe("Revision number (default latest)."),
+      t: z.number().optional().describe("Optional time in ms to list visible layers at that frame."),
+      compareWith: z.number().int().optional().describe("Optional earlier revision number to diff against."),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  ({ cut, revision, t, compareWith }) => guarded(async () => text(await call("/api/agent/inspect", { cut, revision, t, compareWith, agent: await agentName() }))),
 );
 
 server.registerTool(

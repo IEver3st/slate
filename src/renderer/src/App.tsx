@@ -5,6 +5,7 @@ import { Review } from "./components/Review";
 import { connection } from "./lib/api";
 import { SettingsHost } from "./components/Settings";
 import { SetupHost } from "./components/Setup";
+import { CommandPalette } from "./components/CommandPalette";
 
 export function App() {
   const [target, setTarget] = useState<OpenTarget | undefined>(() => {
@@ -40,7 +41,12 @@ export function App() {
   if (!ready) return <div className="drag h-12" />;
   return (
     <>
-      {target ? <Review key={`${target.cutId}-${target.rev}-${target.t}`} cutId={target.cutId} start={target} onBack={() => setTarget(undefined)} /> : <Library onOpen={setTarget} />}
+      {target ? (
+        <Review key={`${target.cutId}-${target.rev}-${target.t}`} cutId={target.cutId} start={target} onBack={() => setTarget(undefined)} onOpenCut={setTarget} />
+      ) : (
+        <Library onOpen={setTarget} />
+      )}
+      <CommandPalette onOpenCut={setTarget} currentCutId={target?.cutId} />
       <SettingsHost />
       <SetupHost />
       {updated && <UpdatedNotice update={updated} onDone={() => setUpdated(undefined)} />}
@@ -57,7 +63,7 @@ function UpdatedNotice({ update, onDone }: { update: Resume; onDone: () => void 
   }, []);
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center">
-      <button onClick={onDone} className="pointer-events-auto flex max-w-xl items-center gap-3 rounded-xl bg-raised px-4 py-2.5 text-left shadow-[0_10px_40px_rgba(0,0,0,.5)]">
+      <button onClick={onDone} className="toast-in pointer-events-auto flex max-w-xl items-center gap-3 rounded-xl bg-raised px-4 py-2.5 text-left shadow-[0_10px_40px_rgba(0,0,0,.5)]">
         <span className="shrink-0 font-semibold text-amber">Updated to {update.to}</span>
         <span className="truncate text-soft">{update.subject}</span>
       </button>

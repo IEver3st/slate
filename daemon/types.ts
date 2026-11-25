@@ -78,11 +78,29 @@ export type Activity = {
   id: string;
   at: string;
   author: Author;
-  kind: "status" | "revision" | "note" | "reply" | "publish" | "approve" | "edit" | "render" | "export" | "open";
+  kind: "status" | "revision" | "note" | "reply" | "publish" | "approve" | "edit" | "render" | "export" | "open" | "message";
   state?: "working" | "ready" | "blocked" | "idle";
   text: string;
   rev?: number;
   noteId?: string;
+};
+
+export type CutMessage = {
+  id: string;
+  author: Author;
+  text: string;
+  at: string;
+  rev?: number;
+  replyToBlocked?: boolean;
+};
+
+export type AgentPresence = {
+  name: string;
+  state: string;
+  text: string;
+  at: string;
+  progress?: number;
+  step?: string;
 };
 
 export type SegmentState = "ready" | "queued" | "rendering" | "failed" | "missing";
@@ -96,7 +114,7 @@ export type CutSummary = {
   recent: { n: number; at: string; author: Author }[];
   openNotes: number;
   draftNotes: number;
-  agent?: { name: string; state: string; text: string; at: string };
+  agent?: AgentPresence;
   approvedRev?: number;
   seenRev?: number;
   render: { ready: number; total: number; rendering: boolean; failed: number };

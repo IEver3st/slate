@@ -9,9 +9,24 @@ import { SHIM, taskkillTree } from "./render";
 import { nowIso, stampOf, type Cut, type SourceLease } from "./cuts";
 import type { Author } from "./types";
 
-export const EXPORT_PROFILE = { resolution: "4k", fps: 60, label: "4K60" } as const;
+export type ExportPresetId = "4k60" | "1080p60" | "1080p30" | "720p60";
+export type ExportPreset = { id: ExportPresetId; resolution: string; fps: number; label: string; detail: string };
 
-export type ExportRecord = { id: string; rev: number; file: string; at: string; bytes: number; ms: number; encoder: string; width?: number; height?: number };
+export const EXPORT_PRESETS: Record<ExportPresetId, ExportPreset> = {
+  "4k60": { id: "4k60", resolution: "4k", fps: 60, label: "4K60", detail: "3840×2160, 60 fps master" },
+  "1080p60": { id: "1080p60", resolution: "1080p", fps: 60, label: "1080p60", detail: "1920×1080, 60 fps standard" },
+  "1080p30": { id: "1080p30", resolution: "1080p", fps: 30, label: "1080p30", detail: "1920×1080, 30 fps compact" },
+  "720p60": { id: "720p60", resolution: "720p", fps: 60, label: "720p60", detail: "1280×720, 60 fps fast draft" },
+};
+
+export const EXPORT_PROFILE = EXPORT_PRESETS["4k60"];
+
+export function resolvePreset(id?: unknown): ExportPreset {
+  if (typeof id === "string" && id in EXPORT_PRESETS) return EXPORT_PRESETS[id as ExportPresetId];
+  return EXPORT_PROFILE;
+}
+
+export type ExportRecord = { id: string; rev: number; file: string; at: string; bytes: number; ms: number; encoder: string; width?: number; height?: number; preset?: ExportPresetId; label?: string };
 
 type Phase = "waiting" | "starting" | "rendering" | "finishing";
 
@@ -19,6 +34,7 @@ type Job = {
   id: string;
   cut: Cut;
   rev: number;
+  preset: ExportPreset;
   author: Author;
   phase: Phase;
   queuedAt: number;
@@ -85,11 +101,14 @@ export class Exporter {
     const ahead = job ? all.indexOf(job) : 0;
     return {
       profile: EXPORT_PROFILE.label,
+      presets: Object.values(EXPORT_PRESETS),
       ready: exportReadiness(),
       job: job
         ? {
             id: job.id,
             rev: job.rev,
+            preset: job.preset.id,
+            label: job.preset.label,
             phase: job.phase,
             ahead,
             progress: job.total ? Math.min(job.phase === "finishing" ? 1 : 0.99, job.completed / job.total) : 0,
@@ -113,13 +132,13 @@ export class Exporter {
             exists = s.isFile();
             bytes = s.size;
           } catch {}
-          return { ...r, bytes, exists };
+          return { ...r, preset: r.preset ?? "4k60", label: r.label ?? EXPORT_PROFILE.label, bytes, exists };
         })
         .reverse(),
     };
   }
 
-  start(cut: Cut, rev: number, author: Author) {
+  start(cut: Cut, rev: number, author: Author, presetId?: unknown) {
     const ready = exportReadiness();
     if (!ready.ok) throw new Error(ready.reason);
     const r = cut.revision(rev);
@@ -127,11 +146,12 @@ export class Exporter {
     if (!cut.renderSource(rev)) throw new Error(`r${rev} is no longer kept on disk, so it cannot be exported`);
     const existing = [this.current, ...this.queue].find((j) => j?.cut.id === cut.id);
     if (existing) throw new Error(existing.rev === rev ? `r${rev} is already exporting` : `r${existing.rev} is exporting; cancel it first`);
-    const job: Job = { id: randomUUID().slice(0, 8), cut, rev, author, phase: "waiting", queuedAt: Date.now(), completed: 0, total: 0 };
+    const preset = resolvePreset(presetId);
+    const job: Job = { id: randomUUID().slice(0, 8), cut, rev, preset, author, phase: "waiting", queuedAt: Date.now(), completed: 0, total: 0 };
     cut.pinned.add(rev);
     this.failures.delete(cut.id);
     this.queue.push(job);
-    console.log(`[slate] export ${cut.name} r${rev} queued (${job.id})`);
+    console.log(`[slate] export ${cut.name} r${rev} (${preset.label}) queued (${job.id})`);
     this.changed(job, "queued");
     void this.pump();
     return job.id;
@@ -154,9 +174,9 @@ export class Exporter {
   }
 
   private changed(job: Job, state: "queued" | "running" | "done" | "failed" | "cancelled", extra?: { file?: string; error?: string; bytes?: number }) {
-    emit({ type: "export", cutId: job.cut.id, cut: job.cut.name, rev: job.rev, state, progress: job.total ? job.completed / job.total : 0, phase: job.phase, ...extra });
+    emit({ type: "export", cutId: job.cut.id, cut: job.cut.name, rev: job.rev, label: job.preset.label, state, progress: job.total ? job.completed / job.total : 0, phase: job.phase, ...extra });
     if (state === "running" && job.phase !== "starting") return;
-    for (const q of this.queue) if (q !== job) emit({ type: "export", cutId: q.cut.id, cut: q.cut.name, rev: q.rev, state: "queued", progress: 0, phase: q.phase });
+    for (const q of this.queue) if (q !== job) emit({ type: "export", cutId: q.cut.id, cut: q.cut.name, rev: q.rev, label: q.preset.label, state: "queued", progress: 0, phase: q.phase });
   }
 
   private async pump() {
@@ -172,10 +192,10 @@ export class Exporter {
     }
   }
 
-  private target(cut: Cut, rev: number) {
+  private target(cut: Cut, rev: number, preset: ExportPreset) {
     const folder = dirname(cut.path);
-    const stem = `${cut.name} r${rev} ${EXPORT_PROFILE.label}`;
-    const ours = new Set(this.history(cut).filter((r) => r.rev === rev).map((r) => r.file.toLowerCase()));
+    const stem = `${cut.name} r${rev} ${preset.label}`;
+    const ours = new Set(this.history(cut).filter((r) => r.rev === rev && (r.preset ?? "4k60") === preset.id).map((r) => r.file.toLowerCase()));
     for (let k = 1; k < 1000; k++) {
       const file = join(folder, k === 1 ? `${stem}.mp4` : `${stem} (${k}).mp4`);
       if (!existsSync(file) || ours.has(file.toLowerCase())) return file;
@@ -251,7 +271,7 @@ export class Exporter {
       this.sweep(folder);
     }
     const rev = cut.revision(job.rev)!;
-    const file = this.target(cut, job.rev);
+    const file = this.target(cut, job.rev, job.preset);
     const temp = join(folder, `.${cut.name} r${job.rev}.${job.id}.part.mp4`);
     job.file = file;
     job.temp = temp;
@@ -259,7 +279,7 @@ export class Exporter {
     job.startedAt = Date.now();
     const encoder = await pickEncoder();
     const dir = join(JOB_DIR, `export-${job.id}`);
-    console.log(`[slate] export ${cut.name} r${job.rev} from ${source.path}${source.live ? " (live file)" : ""} to ${file} with ${encoder}`);
+    console.log(`[slate] export ${cut.name} r${job.rev} (${job.preset.label}) from ${source.path}${source.live ? " (live file)" : ""} to ${file} with ${encoder}`);
     this.changed(job, "running");
     let lastEmit = 0;
     try {
@@ -270,8 +290,8 @@ export class Exporter {
         cli,
         project: source.path,
         output: temp,
-        resolution: EXPORT_PROFILE.resolution,
-        fps: EXPORT_PROFILE.fps,
+        resolution: job.preset.resolution,
+        fps: job.preset.fps,
         startMs: 0,
         durationMs: rev.durationMs,
         shim: SHIM,
@@ -302,9 +322,9 @@ export class Exporter {
       const placed = this.place(temp, file);
       const bytes = statSync(placed).size;
       const ms = Date.now() - job.startedAt;
-      this.record(cut, { id: job.id, rev: job.rev, file: placed, at: nowIso(), bytes, ms, encoder, width: probe?.width, height: probe?.height });
-      cut.log({ author: job.author, kind: "export", rev: job.rev, text: `Exported r${job.rev} in ${EXPORT_PROFILE.label}, ${(bytes / 1e6).toFixed(0)} MB` });
-      console.log(`[slate] exported ${cut.name} r${job.rev} to ${placed} (${(bytes / 1e6).toFixed(1)} MB, ${probe?.width}x${probe?.height}) in ${ms} ms`);
+      this.record(cut, { id: job.id, rev: job.rev, file: placed, at: nowIso(), bytes, ms, encoder, width: probe?.width, height: probe?.height, preset: job.preset.id, label: job.preset.label });
+      cut.log({ author: job.author, kind: "export", rev: job.rev, text: `Exported r${job.rev} in ${job.preset.label}, ${(bytes / 1e6).toFixed(0)} MB` });
+      console.log(`[slate] exported ${cut.name} r${job.rev} (${job.preset.label}) to ${placed} (${(bytes / 1e6).toFixed(1)} MB, ${probe?.width}x${probe?.height}) in ${ms} ms`);
       job.completed = job.total || 1;
       this.changed(job, "done", { file: placed, bytes });
       rmSync(dir, { recursive: true, force: true });

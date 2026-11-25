@@ -8,13 +8,24 @@ import { analyze, diffDocs, hash, type Analysis, type AssetTable, type Doc, cano
 import { cutDataDir, cutIdFor, legacyCutDataDir, normPath, readJson, relocated, writeJsonAtomic, REGISTRY_FILE } from "./paths";
 import { emit } from "./events";
 import { owner } from "./settings";
-import type { Activity, Author, CutSummary, Note, Revision } from "./types";
+import type { Activity, AgentPresence, Author, CutMessage, CutSummary, Note, Revision } from "./types";
 
 export const RENDER_SETTINGS = { resolution: "1080p", fps: 60, segmentMs: 1000, keyframeMs: 500, version: 2, cli: "", encoder: "" };
 
-export function configureRender(cli: string, encoder: string) {
+export function configureRender(cli: string, encoder: string, preview?: { resolution: string; fps: number }) {
   RENDER_SETTINGS.cli = cli;
   RENDER_SETTINGS.encoder = encoder;
+  if (preview) {
+    RENDER_SETTINGS.resolution = preview.resolution;
+    RENDER_SETTINGS.fps = preview.fps;
+  }
+}
+
+export function configurePreview(resolution: string, fps: number) {
+  if (RENDER_SETTINGS.resolution === resolution && RENDER_SETTINGS.fps === fps) return false;
+  RENDER_SETTINGS.resolution = resolution;
+  RENDER_SETTINGS.fps = fps;
+  return true;
 }
 
 export const keySignature = () => hash(RENDER_SETTINGS);
@@ -112,8 +123,9 @@ export class Cut {
   readonly dataDir: string;
   revisions: Revision[] = [];
   notes: Note[] = [];
+  messages: CutMessage[] = [];
   activity: Activity[] = [];
-  agent?: { name: string; state: string; text: string; at: string };
+  agent?: AgentPresence;
   approvedRev?: number;
   seenRev?: number;
   collaborators: { thread: string; agent: string; at: string; link?: string }[] = [];
@@ -140,8 +152,9 @@ export class Cut {
     this.dataDir = cutDataDir(this.path);
     mkdirSync(join(this.dataDir, "docs"), { recursive: true });
     mkdirSync(join(this.dataDir, "frames"), { recursive: true });
-    const state = readJson<{ revisions: Revision[]; approvedRev?: number; seenRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"]; storage?: Storage; inPlaceWriter?: boolean }>(join(this.dataDir, "revisions.json"), { revisions: [] });
+    const state = readJson<{ revisions: Revision[]; messages?: CutMessage[]; approvedRev?: number; seenRev?: number; agent?: Cut["agent"]; collaborators?: Cut["collaborators"]; storage?: Storage; inPlaceWriter?: boolean }>(join(this.dataDir, "revisions.json"), { revisions: [] });
     this.revisions = state.revisions ?? [];
+    this.messages = (state.messages ?? []).slice(-100);
     this.storage = state.storage;
     this.inPlaceWriter = !!state.inPlaceWriter;
     this.approvedRev = state.approvedRev;
@@ -204,9 +217,10 @@ export class Cut {
     return kept;
   }
 
-  private rekey() {
+  rekey() {
     const sig = keySignature();
     let changed = false;
+    this.analyses.clear();
     for (const r of this.revisions) {
       if (r.keySig === sig || !this.renderSource(r.n)) continue;
       const a = this.analysisFor(r.n);
@@ -217,6 +231,7 @@ export class Cut {
       changed = true;
     }
     if (changed) this.saveState();
+    return changed;
   }
 
   private seenFromHistory() {
@@ -244,7 +259,7 @@ export class Cut {
   }
 
   saveState() {
-    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, approvedRev: this.approvedRev, seenRev: this.seenRev, agent: this.agent, collaborators: this.collaborators, storage: this.storage, inPlaceWriter: this.inPlaceWriter || undefined });
+    writeJsonAtomic(join(this.dataDir, "revisions.json"), { cut: this.path, revisions: this.revisions, messages: this.messages.length ? this.messages.slice(-100) : undefined, approvedRev: this.approvedRev, seenRev: this.seenRev, agent: this.agent, collaborators: this.collaborators, storage: this.storage, inPlaceWriter: this.inPlaceWriter || undefined });
   }
 
   saveNotes() {
@@ -300,7 +315,7 @@ export class Cut {
     try {
       const watcher = watch(dir, { persistent: true }, (_evt, name) => {
         if (!name || String(name).toLowerCase() !== file) return;
-        this.scheduleIngest(400);
+        this.scheduleIngest(150);
       });
       watcher.on("error", (e) => {
         console.error(`[slate] stopped watching ${dir}: ${e}; polling instead`);
@@ -393,13 +408,14 @@ export class Cut {
         continue;
       }
       missingSince = undefined;
+      if (!prev && Date.now() - cur.mtimeMs >= 400) return { stat: cur, stable: true };
       if (prev && prev.size === cur.size && prev.mtimeMs === cur.mtimeMs) return { stat: cur, stable: true };
       if (prev && !announced && Date.now() - started > 10_000) {
         announced = true;
         console.log(`[slate] ${this.name} is still being written (${gb(cur.size)} so far); waiting for it to settle`);
       }
       prev = cur;
-      await sleep(250);
+      await sleep(100);
     }
     return { stat: prev, stable: false };
   }
@@ -483,7 +499,7 @@ export class Cut {
       snapshot = existsSync(target) ? join(this.snapshotDir, `r${n}-${Date.now()}.tsrct`) : target;
       renameSync(incoming, snapshot);
     }
-    writeFileSync(join(this.dataDir, "docs", `r${n}.json.gz`), gzipSync(JSON.stringify({ doc: loaded.doc, assets: loaded.assets })));
+    writeFileSync(join(this.dataDir, "docs", `r${n}.json.gz`), gzipSync(JSON.stringify({ doc: loaded.doc, assets: loaded.assets }), { level: 1 }));
     writeFileSync(this.rawDocFile(n), loaded.raw);
     this.docs.set(n, { doc: loaded.doc, assets: loaded.assets });
     const analysis = analyze(loaded.doc, loaded.assets, RENDER_SETTINGS);
@@ -856,6 +872,7 @@ export function describeChanges(rev: Revision) {
 export class Registry {
   cuts = new Map<string, Cut>();
   roots: string[];
+  private libraryCache?: { at: number; files: { path: string; folder: string; name: string; mtimeMs: number; size: number; registered: boolean }[] };
   onRevision?: (cut: Cut, rev: Revision) => void;
   onSourceLost?: (cut: Cut, n: number) => void;
   onFold?: (cut: Cut, n: number) => void;
@@ -881,6 +898,7 @@ export class Registry {
     cut.onSourceLost = (c, n) => this.onSourceLost?.(c, n);
     cut.onFold = (c, n) => this.onFold?.(c, n);
     this.cuts.set(id, cut);
+    this.libraryCache = undefined;
     cut.startWatching();
     cut.scheduleIngest(0);
     if (persist) {
@@ -895,6 +913,7 @@ export class Registry {
     if (!cut) return;
     cut.stopWatching();
     this.cuts.delete(id);
+    this.libraryCache = undefined;
     this.save();
     emit({ type: "cuts" });
   }
@@ -906,11 +925,13 @@ export class Registry {
   setRoots(roots: string[]) {
     const seen = new Set<string>();
     this.roots = roots.map(normPath).filter((r) => !seen.has(r.toLowerCase()) && seen.add(r.toLowerCase()));
+    this.libraryCache = undefined;
     this.save();
     emit({ type: "library" });
   }
 
-  scanLibrary(): { path: string; folder: string; name: string; mtimeMs: number; size: number; registered: boolean }[] {
+  scanLibrary(force = false): { path: string; folder: string; name: string; mtimeMs: number; size: number; registered: boolean }[] {
+    if (!force && this.libraryCache && Date.now() - this.libraryCache.at < 4000) return this.libraryCache.files;
     const out: { path: string; folder: string; name: string; mtimeMs: number; size: number; registered: boolean }[] = [];
     const skip = (d: string) => d.startsWith(".") || /^(versions|final|previews|sources|captures|brainstorm|node_modules)$/i.test(d);
     const visit = (dir: string, depth: number) => {
@@ -933,6 +954,8 @@ export class Registry {
       }
     };
     for (const root of this.roots) visit(root, 0);
-    return out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const sorted = out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    this.libraryCache = { at: Date.now(), files: sorted };
+    return sorted;
   }
 }

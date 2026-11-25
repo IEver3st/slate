@@ -19,7 +19,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLBut
     <button
       ref={ref}
       className={cn(
-        "no-drag inline-flex shrink-0 items-center justify-center gap-2 rounded-lg font-semibold whitespace-nowrap transition-colors disabled:cursor-default",
+        "no-drag inline-flex shrink-0 items-center justify-center gap-2 rounded-lg font-semibold whitespace-nowrap transition-[color,background-color,transform,filter] duration-150 enabled:active:scale-[0.97] disabled:cursor-default",
         size === "md" ? "h-8 px-3.5 text-[13.5px]" : "h-7 px-2.5 text-[12.5px]",
         variants[variant],
         className,
@@ -31,10 +31,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLBut
 
 export function Tip({ label, keys, children, side = "top" }: { label: string; keys?: string; children: ReactNode; side?: "top" | "bottom" | "left" | "right" }) {
   return (
-    <T.Root delayDuration={350}>
+    <T.Root delayDuration={280}>
       <T.Trigger asChild>{children}</T.Trigger>
       <T.Portal>
-        <T.Content side={side} sideOffset={6} className="z-50 flex items-center gap-2 rounded-md bg-raised px-2.5 py-1.5 text-[12.5px] text-text shadow-[0_6px_24px_rgba(0,0,0,.45)]">
+        <T.Content side={side} sideOffset={6} className="pop-content z-50 flex items-center gap-2 rounded-md bg-raised/95 px-2.5 py-1.5 text-[12.5px] text-text shadow-[0_6px_24px_rgba(0,0,0,.45)] backdrop-blur-sm">
           {label}
           {keys && <span className="rounded bg-ink px-1.5 py-px text-[11.5px] text-soft">{keys}</span>}
         </T.Content>
@@ -52,7 +52,7 @@ export const IconButton = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTM
           aria-label={label}
           aria-pressed={active}
           className={cn(
-            "no-drag grid size-8 shrink-0 place-items-center rounded-lg transition-colors disabled:text-faint [&_svg]:size-[17px]",
+            "no-drag grid size-8 shrink-0 place-items-center rounded-lg transition-[color,background-color,transform] duration-150 enabled:active:scale-[0.94] disabled:text-faint [&_svg]:size-[17px]",
             active ? "bg-raised text-amber" : "text-soft hover:bg-raised hover:text-text",
             className,
           )}

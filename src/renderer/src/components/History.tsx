@@ -46,7 +46,7 @@ export function History({
       {revs.map((r) => {
         const isViewing = (viewing ?? latest) === r.n;
         return (
-          <div key={r.n} className={cn("mx-1 grid grid-cols-[40px_1fr_auto] gap-x-2 rounded-xl px-3 py-2.5", isViewing ? "bg-raised" : "hover:bg-panel/60")}>
+          <div key={r.n} className={cn("mx-1 grid grid-cols-[40px_1fr_auto] gap-x-2 rounded-xl px-3 py-2.5 transition-colors duration-150", isViewing ? "bg-raised" : "hover:bg-panel/60")}>
             <button className={cn("text-left text-[19px] leading-tight font-semibold", isViewing ? "text-text" : "text-faint")} onClick={() => onView(r.n === latest ? undefined : r.n)}>
               r{r.n}
             </button>

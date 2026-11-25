@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
-import { MoreHorizontal, Square, ArrowUpRight, PenLine, MapPin, X, CornerDownRight, Crosshair } from "lucide-react";
-import type { Annotation, CutDetail, Note, NoteTag, NoteTarget } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle } from "react";
+import { MoreHorizontal, Square, ArrowUpRight, PenLine, MapPin, X, CornerDownRight, Crosshair, Check, Copy, Search, MessageSquare, CheckCheck } from "lucide-react";
+import type { Annotation, CutDetail, Note, NoteStatus, NoteTag, NoteTarget } from "@/lib/api";
 import { TAGS, tagOf, sendable, unwritten } from "@/lib/tags";
-import { api, mediaUrl } from "@/lib/api";
+import { api, media } from "@/lib/api";
 import { ago, cn, tc } from "@/lib/format";
 import { Button, IconButton } from "./ui/button";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from "./ui/menu";
@@ -29,12 +29,11 @@ function statusTone(n: Note) {
 }
 
 function MarkedFrame({ path }: { path: string }) {
-  const [src, setSrc] = useState<string>();
-  useEffect(() => {
-    void mediaUrl(path).then(setSrc);
-  }, [path]);
-  return src ? <img src={src} className="mt-2 h-32 w-auto rounded-md" draggable={false} /> : null;
+  const src = media(path);
+  return src ? <img src={src} loading="lazy" decoding="async" className="mt-2 h-32 w-auto rounded-md" draggable={false} /> : null;
 }
+
+type ToastFn = (msg: string, tone?: "error", action?: { label: string; run: () => void }) => void;
 
 function CueCard({
   cut,
@@ -53,7 +52,7 @@ function CueCard({
   onSelect: () => void;
   onSeek: (ms: number) => void;
   agentName?: string;
-  toast: (msg: string, tone?: "error") => void;
+  toast: ToastFn;
 }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(note.text);
@@ -83,7 +82,7 @@ function CueCard({
       await api(`/api/cuts/${cut.id}/notes/${note.id}/reply`, { body: { text: replyText.trim(), status } });
       setReplyText("");
       setReplying(false);
-    });
+    }, status === "open" ? "Reopened and notified agent" : undefined);
 
   const edit = note.kind === "edit";
   const queued = edit && note.applied === false;
@@ -92,11 +91,11 @@ function CueCard({
     <div
       ref={ref}
       onClick={onSelect}
-      className={cn("grid grid-cols-[24px_1fr] gap-x-3 gap-y-1.5 rounded-xl px-3 py-3 transition-colors", selected ? "bg-raised" : "hover:bg-panel/60", done && !selected && "opacity-60")}
+      className={cn("cue-card group/card grid grid-cols-[24px_1fr] gap-x-3 gap-y-1.5 rounded-xl px-3 py-3", selected ? "bg-raised" : "hover:bg-panel/60", done && !selected && "opacity-60")}
     >
       <div
         className={cn(
-          "mt-px grid size-6 place-items-center rounded-full text-[12px] font-bold",
+          "mt-px grid size-6 place-items-center rounded-full text-[12px] font-bold transition-colors",
           note.status === "draft" ? "text-amber shadow-[inset_0_0_0_2px_var(--color-amber)]" : done || note.status === "addressed" ? "bg-hover text-soft" : "bg-amber text-amber-ink",
         )}
       >
@@ -104,7 +103,7 @@ function CueCard({
       </div>
       <div className="flex min-w-0 items-baseline gap-2">
         <button
-          className="font-semibold text-amber hover:underline"
+          className="font-semibold text-amber tabular-nums hover:underline"
           onClick={(e) => {
             e.stopPropagation();
             onSeek(note.displayT);
@@ -118,6 +117,19 @@ function CueCard({
         <span className={cn("ml-auto shrink-0 text-[12.5px]", statusTone(note))}>
           {edit && note.overwrittenIn && !done ? `Overwritten in r${note.overwrittenIn}` : queued ? `Waiting for ${agentName ?? "the agent"}` : edit && note.status === "open" ? "Applied" : statusText[note.status]}
         </span>
+        {note.status === "addressed" && (
+          <button
+            title="Mark resolved"
+            aria-label="Mark resolved"
+            onClick={(e) => {
+              e.stopPropagation();
+              void run(() => patch({ status: "resolved" }));
+            }}
+            className="-my-1 grid size-6 shrink-0 place-items-center rounded-md text-teal opacity-0 transition-opacity group-hover/card:opacity-100 hover:bg-teal/15"
+          >
+            <Check className="size-3.5" strokeWidth={2.5} />
+          </button>
+        )}
         <Menu onOpenChange={(o) => !o && setArmed(false)}>
           <MenuTrigger asChild>
             <button className="-my-1 grid size-6 shrink-0 place-items-center rounded-md text-dim hover:bg-hover hover:text-text" aria-label="Note actions" onClick={(e) => e.stopPropagation()}>
@@ -131,7 +143,7 @@ function CueCard({
             {edit && !queued && note.status !== "wontfix" && <MenuItem onSelect={() => void run(() => api(`/api/cuts/${cut.id}/edits/${note.id}/undo`, { body: {} }), "Edit undone")}>Undo edit</MenuItem>}
             {!done && note.status !== "draft" && <MenuItem onSelect={() => void run(() => patch({ status: "resolved" }))}>Resolve</MenuItem>}
             {(done || note.status === "addressed") && <MenuItem onSelect={() => void run(() => patch({ status: "open" }))}>Reopen</MenuItem>}
-            <MenuItem onSelect={() => void navigator.clipboard.writeText(note.id)}>Copy note id</MenuItem>
+            <MenuItem onSelect={() => void navigator.clipboard.writeText(note.id).then(() => toast("Copied note ID"))}>Copy note id</MenuItem>
             <MenuSeparator />
             <MenuItem
               danger
@@ -245,7 +257,31 @@ function CueCard({
   );
 }
 
-export type ComposerHandle = { focus: () => void; send: () => void };
+type FilterMode = "all" | "draft" | "open" | "addressed" | "done";
+
+export function buildFeedbackBrief(cut: CutDetail, cues: Note[]) {
+  const actionable = cues.filter((n) => n.status === "draft" || n.status === "open" || n.status === "claimed");
+  const list = actionable.length ? actionable : cues.filter((n) => n.status !== "resolved" && n.status !== "wontfix");
+  const lines: string[] = [
+    `Review notes for "${cut.name}" (r${cut.rev ?? cut.latest?.n ?? 1})`,
+    `Cut: ${cut.path}`,
+    "",
+  ];
+  list.forEach((n, i) => {
+    const body = n.text || tagOf(n.tag)?.sentence || "See frame";
+    const meta = [
+      n.tag ? `[${n.tag}]` : "",
+      n.target ? `layer: ${n.target.name}` : "",
+      n.annotations.length ? "has frame markings" : "",
+      n.media?.length ? `media: ${n.media.map((m) => m.name).join(", ")}` : "",
+    ].filter(Boolean).join(" · ");
+    lines.push(`${i + 1}. [${tc(n.displayT)}] (${n.id})${meta ? ` ${meta}` : ""} — ${body}`);
+  });
+  lines.push("", `Call slate_feedback with cut "${cut.path}" for full context and frame PNGs, then slate_publish after saving.`);
+  return lines.join("\n");
+}
+
+export type ComposerHandle = { focus: () => void; send: () => void; resolveAllFixes: () => void; copyBrief: () => void };
 
 export const Cues = forwardRef<
   ComposerHandle,
@@ -268,16 +304,70 @@ export const Cues = forwardRef<
     against?: number;
     onNextUnwritten: (after?: string) => void;
     onFixCheck: () => void;
-    toast: (msg: string, tone?: "error") => void;
+    onOpenMessage: () => void;
+    toast: ToastFn;
   }
->(function Cues({ cut, cues, selected, onSelect, onSeek, now, range, onDismissRange, tool, onTool, pending, onClearPending, captureMarked, target, onClearTarget, against, onNextUnwritten, onFixCheck, toast }, ref) {
+>(function Cues(
+  {
+    cut,
+    cues,
+    selected,
+    onSelect,
+    onSeek,
+    now,
+    range,
+    onDismissRange,
+    tool,
+    onTool,
+    pending,
+    onClearPending,
+    captureMarked,
+    target,
+    onClearTarget,
+    against,
+    onNextUnwritten,
+    onFixCheck,
+    onOpenMessage,
+    toast,
+  },
+  ref,
+) {
   const [text, setText] = useState("");
   const [tag, setTag] = useState<NoteTag | null>();
+  const [filter, setFilter] = useState<FilterMode>("all");
+  const [q, setQ] = useState("");
   const [showDone, setShowDone] = useState(() => preferences().showResolved);
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
-  const done = cues.filter((n) => n.status === "resolved" || n.status === "wontfix");
-  const visible = showDone ? cues : cues.filter((n) => !done.includes(n));
+
+  const counts = useMemo(() => {
+    let draft = 0, open = 0, addressed = 0, done = 0;
+    for (const n of cues) {
+      if (n.status === "draft") draft++;
+      else if (n.status === "open" || n.status === "claimed") open++;
+      else if (n.status === "addressed") addressed++;
+      else done++;
+    }
+    return { draft, open, addressed, done };
+  }, [cues]);
+
+  const visible = useMemo(() => {
+    const terms = q.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    return cues.filter((n) => {
+      const isDone = n.status === "resolved" || n.status === "wontfix";
+      if (filter === "draft" && n.status !== "draft") return false;
+      if (filter === "open" && n.status !== "open" && n.status !== "claimed") return false;
+      if (filter === "addressed" && n.status !== "addressed") return false;
+      if (filter === "done" && !isDone) return false;
+      if (filter === "all" && !showDone && isDone) return false;
+      if (terms.length) {
+        const hay = `${n.text} ${n.tag ?? ""} ${n.target?.name ?? ""} ${tc(n.displayT)} ${n.thread.map((t) => t.text).join(" ")}`.toLowerCase();
+        if (!terms.every((t) => hay.includes(t))) return false;
+      }
+      return true;
+    });
+  }, [cues, filter, showDone, q]);
+
   const agentName = cut.collaborators.at(-1)?.agent ?? cut.agent?.name;
   const bound = cues.find((n) => n.id === selected && unwritten(n));
   const at = range ? range.in : now;
@@ -285,6 +375,7 @@ export const Cues = forwardRef<
   const hasContent = !!(text.trim() || pending.length || target || (bound ? tag !== undefined : tag));
   const sendCount = cues.filter(sendable).length + (hasContent && (!bound || !sendable(bound)) ? 1 : 0);
   const fixes = cues.filter((n) => n.status === "addressed" && n.kind === "note").length;
+  const recentMessages = (cut.messages ?? []).slice(-3);
 
   useEffect(() => {
     setTag(undefined);
@@ -361,7 +452,30 @@ export const Cues = forwardRef<
     }
   };
 
-  useImperativeHandle(ref, () => ({ focus: () => input.current?.focus(), send: () => void send() }));
+  const resolveAllFixes = async () => {
+    try {
+      const r = await api<{ changed: string[]; previous: Record<string, NoteStatus> }>(`/api/cuts/${cut.id}/notes/batch`, { body: { action: "resolveAddressed" } });
+      if (!r.changed.length) return;
+      toast(`Resolved ${r.changed.length} ${r.changed.length === 1 ? "fix" : "fixes"}`, undefined, {
+        label: "Undo",
+        run: () => void api(`/api/cuts/${cut.id}/notes/batch`, { body: { action: "restore", ids: r.changed, statuses: r.previous } }).catch(() => {}),
+      });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  };
+
+  const copyBrief = () => {
+    if (!cues.length) return toast("No cues to copy yet");
+    void navigator.clipboard.writeText(buildFeedbackBrief(cut, cues)).then(() => toast("Copied review brief for agent"));
+  };
+
+  useImperativeHandle(ref, () => ({
+    focus: () => input.current?.focus(),
+    send: () => void send(),
+    resolveAllFixes: () => void resolveAllFixes(),
+    copyBrief,
+  }));
 
   const tools: { t: Tool; label: string; keys: string; icon: React.ReactNode }[] = [
     { t: "rect", label: "Box", keys: "R", icon: <Square /> },
@@ -371,36 +485,104 @@ export const Cues = forwardRef<
     { t: "target", label: "Pick the layer", keys: "T", icon: <Crosshair /> },
   ];
 
+  const showFilterBar = cues.length >= 3;
+  const pills: { id: FilterMode; label: string; count?: number }[] = [
+    { id: "all", label: "Active", count: cues.length - counts.done },
+    ...(counts.draft ? [{ id: "draft" as const, label: "Drafts", count: counts.draft }] : []),
+    ...(counts.open ? [{ id: "open" as const, label: "Sent", count: counts.open }] : []),
+    ...(counts.addressed ? [{ id: "addressed" as const, label: "Fixes", count: counts.addressed }] : []),
+    ...(counts.done ? [{ id: "done" as const, label: "Done", count: counts.done }] : []),
+  ];
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {showFilterBar && (
+        <div className="flex flex-col gap-1.5 px-3 pt-2.5 pb-1">
+          <div className="flex flex-wrap items-center gap-1">
+            {pills.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setFilter(p.id)}
+                className={cn(
+                  "rounded-md px-2 py-0.5 text-[11.5px] font-semibold transition-colors",
+                  filter === p.id ? "bg-raised text-text" : "text-dim hover:bg-raised/50 hover:text-soft",
+                )}
+              >
+                {p.label}
+                {p.count ? <span className="ml-1 text-faint tabular-nums">{p.count}</span> : null}
+              </button>
+            ))}
+          </div>
+          {cues.length >= 5 && (
+            <label className="flex h-7 items-center gap-1.5 rounded-lg bg-ink px-2 text-faint focus-within:text-soft focus-within:ring-1 focus-within:ring-amber/60">
+              <Search className="size-3.5 shrink-0" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => e.key === "Escape" && (setQ(""), e.currentTarget.blur())}
+                placeholder="Filter cues..."
+                className="h-full min-w-0 flex-1 bg-transparent text-[12.5px] text-text outline-none placeholder:text-faint"
+              />
+              {q && (
+                <button onClick={() => setQ("")} className="text-dim hover:text-text" aria-label="Clear filter">
+                  <X className="size-3" />
+                </button>
+              )}
+            </label>
+          )}
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {fixes > 0 && (
-          <button className="mx-1 mt-2 mb-1 grid w-[calc(100%-8px)] rounded-xl bg-teal/10 px-3 py-2.5 text-left hover:bg-teal/15" onClick={onFixCheck}>
-            <span className="font-semibold text-teal">
-              Check {fixes} {fixes === 1 ? "fix" : "fixes"}
-            </span>
-            <span className="text-[12.5px] text-soft">Marked addressed. Watch each one and say if it looks good.</span>
-          </button>
+          <div className="mx-1 mt-2 mb-1 flex items-stretch gap-1">
+            <button className="grid min-w-0 flex-1 rounded-xl bg-teal/10 px-3 py-2.5 text-left transition-colors hover:bg-teal/15" onClick={onFixCheck}>
+              <span className="font-semibold text-teal">
+                Check {fixes} {fixes === 1 ? "fix" : "fixes"}
+              </span>
+              <span className="text-[12.5px] text-soft">Watch each one and confirm.</span>
+            </button>
+            <IconButton label="Resolve all addressed fixes" onClick={() => void resolveAllFixes()} className="h-auto w-10 rounded-xl bg-teal/10 text-teal hover:bg-teal/20 hover:text-teal">
+              <CheckCheck />
+            </IconButton>
+          </div>
+        )}
+        {recentMessages.length > 0 && filter === "all" && !q && (
+          <div className="mx-1 mt-2 mb-1 rounded-xl bg-ink/60 px-3 py-2">
+            <div className="flex items-center justify-between text-[11.5px] text-dim">
+              <span className="font-semibold">Recent directives</span>
+              <button onClick={onOpenMessage} className="text-amber hover:underline">
+                Message agent
+              </button>
+            </div>
+            <div className="mt-1 grid gap-1">
+              {recentMessages.map((m) => (
+                <div key={m.id} className="flex items-baseline gap-2 text-[12.5px]">
+                  <span className="min-w-0 flex-1 truncate text-soft">{m.text}</span>
+                  <span className="shrink-0 text-[11px] text-faint">{ago(m.at)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
         {visible.length === 0 && (
           <div className="px-4 pt-8 text-soft">
-            <div className="font-semibold text-text">Nothing noted yet</div>
-            <p className="mt-1">Press M while it plays to drop a marker, or pause and write what to change. Notes stay drafts until you send them.</p>
+            <div className="font-semibold text-text">{cues.length ? "No matching cues" : "Nothing noted yet"}</div>
+            <p className="mt-1">{cues.length ? "Try clearing the filter or search above." : "Press M while it plays to drop a marker, or pause and write what to change. Notes stay drafts until you send them."}</p>
           </div>
         )}
         {visible.map((n) => (
           <CueCard key={n.id} cut={cut} note={n} index={cues.indexOf(n)} selected={selected === n.id} onSelect={() => onSelect(n.id)} onSeek={onSeek} agentName={agentName} toast={toast} />
         ))}
-        {done.length > 0 && (
+        {filter === "all" && counts.done > 0 && (
           <button className="mx-3 mt-1 text-[12.5px] text-dim hover:text-text" onClick={() => setShowDone(!showDone)}>
-            {showDone ? "Hide resolved" : `Show ${done.length} resolved`}
+            {showDone ? "Hide resolved" : `Show ${counts.done} resolved`}
           </button>
         )}
       </div>
       <div className="grid grid-cols-[minmax(0,1fr)] gap-2.5 px-4 pt-3 pb-4">
-        <div className={cn("rounded-xl bg-ink px-3 pt-2.5 pb-2 focus-within:shadow-[inset_0_0_0_1px_var(--color-line)]", bound && "shadow-[inset_0_0_0_1px_var(--color-amber)] focus-within:shadow-[inset_0_0_0_1px_var(--color-amber)]")}>
+        <div className={cn("rounded-xl bg-ink px-3 pt-2.5 pb-2 transition-shadow focus-within:shadow-[inset_0_0_0_1px_var(--color-line)]", bound && "shadow-[inset_0_0_0_1px_var(--color-amber)] focus-within:shadow-[inset_0_0_0_1px_var(--color-amber)]")}>
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 text-[12.5px]">
-            <span className="font-semibold text-amber">{bound ? `Marker ${cues.indexOf(bound) + 1} at ${tc(bound.displayT)}` : range ? `${tc(range.in)} to ${tc(range.out)}` : tc(now)}</span>
+            <span className="font-semibold text-amber tabular-nums">{bound ? `Marker ${cues.indexOf(bound) + 1} at ${tc(bound.displayT)}` : range ? `${tc(range.in)} to ${tc(range.out)}` : tc(now)}</span>
             {range && !bound && (
               <button aria-label="Note the frame instead of the range" className="grid size-4 place-items-center self-center rounded text-dim hover:text-text" onClick={onDismissRange}>
                 <X className="size-3" />
@@ -454,7 +636,7 @@ export const Cues = forwardRef<
               <button
                 key={t.id}
                 onClick={() => setTag(shownTag === t.id ? null : t.id)}
-                className={cn("flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[12px] font-semibold", shownTag === t.id ? t.chip : "text-dim hover:bg-hover hover:text-soft")}
+                className={cn("flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[12px] font-semibold transition-colors", shownTag === t.id ? t.chip : "text-dim hover:bg-hover hover:text-soft")}
               >
                 {t.label}
                 <span className="text-[11px] font-normal text-faint">{t.key}</span>
@@ -468,6 +650,14 @@ export const Cues = forwardRef<
               {x.icon}
             </IconButton>
           ))}
+          <IconButton label="Message agent directly" onClick={onOpenMessage}>
+            <MessageSquare />
+          </IconButton>
+          {cues.length > 0 && (
+            <IconButton label="Copy feedback brief" onClick={copyBrief}>
+              <Copy />
+            </IconButton>
+          )}
           <div className="flex-1" />
           <Button variant="quiet" disabled={busy || !hasContent} onClick={() => void commit()}>
             {bound ? "Save" : "Add"}

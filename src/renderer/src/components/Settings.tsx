@@ -67,11 +67,12 @@ function useShown() {
   );
 }
 
-type ServiceSettings = { cacheGb: number; renderSlots: number; mediaDir?: string };
+type PreviewQuality = "1080p60" | "720p60" | "720p30";
+type ServiceSettings = { cacheGb: number; renderSlots: number; previewQuality?: PreviewQuality; mediaDir?: string };
 type ServiceState = {
   settings: ServiceSettings;
   defaults: ServiceSettings;
-  choices: { cacheGb: number[]; renderSlots: number[] };
+  choices: { cacheGb: number[]; renderSlots: number[]; previewQuality?: { id: PreviewQuality; label: string; detail: string }[] };
   roots: { path: string; exists: boolean; projects: number }[];
   media: { dir: string; default: string; items: number };
   cache: {
@@ -347,6 +348,10 @@ const SHORTCUTS: { section: string; title: string; keys: string[][] }[] = [
   { section: "Notes", title: "Write the next unwritten marker", keys: [["Tab"]] },
   { section: "Notes", title: "Check fixes: looks good, not yet, skip", keys: [["Enter"], ["R"], ["→"]] },
   { section: "View", title: "Phone safe zones", keys: [["S"]] },
+  { section: "View", title: "Zoom stage in, out, or fit", keys: [["+"], ["-"], ["0"]] },
+  { section: "View", title: "Zoom stage or timeline smoothly", keys: [["Ctrl", "Scroll"]] },
+  { section: "View", title: "Copy current frame PNG", keys: [["Ctrl", "Shift", "C"]] },
+  { section: "View", title: "Copy timecode", keys: [["Shift", "C"]] },
   { section: "View", title: "Compare with an earlier revision", keys: [["C"]] },
   { section: "Compare", title: "Compare with any revision", keys: [["Shift", "Click"]] },
   { section: "Compare", title: "Hold to flip to the other revision", keys: [["V"]] },
@@ -354,6 +359,15 @@ const SHORTCUTS: { section: string; title: string; keys: string[][] }[] = [
   { section: "Compare", title: "Next or previous change", keys: [["G"], ["Shift", "G"]] },
   { section: "View", title: "Keyboard shortcuts", keys: [["?"]] },
   { section: "View", title: "Full screen", keys: [["F"]] },
+  { section: "Anywhere", title: "Command palette", keys: [["Ctrl", "K"]] },
+  {
+    section: "Anywhere",
+    title: "Next or previous cut needing review",
+    keys: [
+      ["Alt", "]"],
+      ["Alt", "["],
+    ],
+  },
   {
     section: "Anywhere",
     title: "Search projects",
@@ -847,9 +861,22 @@ function SettingsBody({ page, setPage, escape }: { page: SettingsPage; setPage: 
         page: "rendering",
         section: "Renders",
         title: "Preview quality",
-        description: "Only the seconds that changed re-render between revisions.",
-        keywords: "resolution fps segments",
-        control: <Value>{`${s.render.resolution} at ${s.render.fps} fps, ${s.render.segmentMs / 1000} s segments`}</Value>,
+        description: "Fast (720p60) renders ~2x faster and Turbo (720p30) ~3.5x faster. Final exports always render at full quality.",
+        keywords: "resolution fps segments speed fast turbo draft quality",
+        service: ["previewQuality"],
+        control: (
+          <Select
+            label="Preview quality"
+            className="min-w-40"
+            value={s.settings.previewQuality ?? "1080p60"}
+            options={(s.choices.previewQuality ?? [
+              { id: "1080p60", label: "Sharp (1080p60)" },
+              { id: "720p60", label: "Fast (720p60)" },
+              { id: "720p30", label: "Turbo (720p30)" },
+            ]).map((q) => ({ value: q.id, label: q.label }))}
+            onChange={(v) => void service.call("", { previewQuality: v })}
+          />
+        ),
       });
       add({
         id: "cli",

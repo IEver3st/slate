@@ -1,13 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { Registry, configureRender } from "./cuts";
+import { Registry, configurePreview, configureRender } from "./cuts";
 import { Renderer, ensureShim } from "./render";
 import { Exporter } from "./exports";
 import { cliVersion, tryFindCli } from "./tsrct";
 import { startServer } from "./server";
 import { DAEMON_FILE, DEFAULT_PORT, HOME_ID, readJson, writeJsonAtomic } from "./paths";
 import { FFMPEG_FOUND, findFfmpeg, pickEncoder } from "./media";
+import { PREVIEW_QUALITIES, onServiceChange, serviceSettings } from "./service";
+import { emit } from "./events";
 
 const VERSION = "0.1.0";
 const daemonDir = dirname(Bun.fileURLToPath(import.meta.url));
@@ -37,10 +39,22 @@ await ensureShim(daemonDir);
 const encoder = await pickEncoder();
 const cli = tryFindCli();
 const cliV = cli ? await cliVersion(cli).catch(() => cli) : "missing";
-configureRender(cliV, encoder);
+const initPreview = PREVIEW_QUALITIES[serviceSettings().previewQuality];
+configureRender(cliV, encoder, { resolution: initPreview.resolution, fps: initPreview.fps });
 const registry = new Registry();
 const renderer = new Renderer(() => [...registry.cuts.values()]);
 const exporter = new Exporter();
+onServiceChange((s) => {
+  const q = PREVIEW_QUALITIES[s.previewQuality];
+  if (!configurePreview(q.resolution, q.fps)) return;
+  console.log(`[slate] preview quality switched to ${q.label}`);
+  renderer.resetQuality();
+  for (const cut of registry.cuts.values()) {
+    cut.rekey();
+    if (cut.latest) renderer.plan(cut, cut.latest.n);
+  }
+  emit({ type: "cuts" });
+});
 registry.onRevision = (cut, rev) => renderer.plan(cut, rev.n);
 registry.onSourceLost = (cut, n) => renderer.abandon(cut, n);
 registry.onFold = (cut, n) => renderer.dropQueued(cut, n);

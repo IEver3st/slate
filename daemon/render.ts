@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, rmSync, statSync, readdirSync, readFileSync, uti
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { exportSpan, findCli, tryFindCli } from "./tsrct";
-import { FFMPEG, PCM_BYTES_PER_FRAME, PCM_RATE, encodeMovie, pickEncoder, readWav, run, sliceWav, splitSpan, writeBuffer, moveInto, makeBlank } from "./media";
+import { FFMPEG, PCM_BYTES_PER_FRAME, PCM_RATE, encodeMovie, extractSpanThumbs, pickEncoder, readWav, run, sliceWav, splitSpan, writeBuffer, moveInto, makeBlank } from "./media";
 import { AUDIO_CACHE, BIN_DIR, FRAME_CACHE, JOB_DIR, MOVIE_CACHE, THUMB_CACHE, VIDEO_CACHE } from "./paths";
 import { MEDIA_THUMBS } from "./medialib";
+import { primePeaks } from "./checks";
 import { SEGMENT_MS } from "./doc";
 import { emit } from "./events";
 import { cacheLimitBytes, onServiceChange, serviceSettings } from "./service";
@@ -42,6 +43,7 @@ type Job = {
   vkeys: string[];
   akeys: string[];
   audioOnly: boolean;
+  fastStart?: boolean;
   priority: number;
   state: "queued" | "running" | "done" | "failed";
   progress: number;
@@ -51,16 +53,17 @@ type Job = {
   error?: string;
 };
 
-type CutStats = { startupMs: number; perSegmentMs: number; samples: number; large: boolean };
+type CutStats = { startupMs: number; perSegmentMs: number; samples: number; large: boolean; huge: boolean };
 
-const CHUNK_MIN = 8;
+const CHUNK_MIN = 4;
 const CHUNK_MAX = 240;
-const ASSEMBLE_MIN_GAP_MS = 4000;
+const FAST_START_SECS = 3;
+const ASSEMBLE_MIN_GAP_MS = 2500;
 const PLAYHEAD_FRESH_MS = 60_000;
 
 function chunkFor(st: CutStats, audioOnly: boolean) {
-  if (audioOnly) return CHUNK_MAX;
-  return Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil((3 * st.startupMs) / st.perSegmentMs)));
+  if (audioOnly) return 24;
+  return Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil((2.5 * st.startupMs) / Math.max(150, st.perSegmentMs))));
 }
 
 export type Movie = {
@@ -74,6 +77,18 @@ export type Movie = {
   builtAt: number;
 };
 
+function previewDimensions(width: number, height: number, resolution: string) {
+  const short = resolution === "720p" ? 720 : resolution === "4k" ? 2160 : 1080;
+  if (height >= width) {
+    const w = short;
+    const h = Math.max(2, Math.round(((short * height) / Math.max(1, width)) / 2) * 2);
+    return { w, h };
+  }
+  const h = short;
+  const w = Math.max(2, Math.round(((short * width) / Math.max(1, height)) / 2) * 2);
+  return { w, h };
+}
+
 export class Renderer {
   private queue: Job[] = [];
   private running = new Set<Job>();
@@ -86,15 +101,46 @@ export class Renderer {
   private assembleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private cli = tryFindCli();
   private failures = new Map<string, { at: number; error: string }>();
+  private videoKeys = new Set<string>();
+  private audioKeys = new Set<string>();
+  private touchedAt = new Map<string, number>();
   concurrency = serviceSettings().renderSlots;
 
   constructor(private cuts: () => Cut[]) {
+    this.seedCacheIndex();
     onServiceChange((s) => {
       const grew = s.renderSlots > this.concurrency;
       this.concurrency = s.renderSlots;
       if (grew) this.pump();
       void this.evict();
     });
+  }
+
+  private seedCacheIndex() {
+    try {
+      for (const f of readdirSync(VIDEO_CACHE)) if (f.endsWith(".mp4")) this.videoKeys.add(f.slice(0, -4));
+    } catch {}
+    try {
+      for (const f of readdirSync(AUDIO_CACHE)) if (f.endsWith(".pcm")) this.audioKeys.add(f.slice(0, -4));
+    } catch {}
+  }
+
+  hasVideo(key: string) {
+    if (this.videoKeys.has(key)) return true;
+    if (existsSync(videoFile(key))) {
+      this.videoKeys.add(key);
+      return true;
+    }
+    return false;
+  }
+
+  hasAudio(key: string) {
+    if (this.audioKeys.has(key)) return true;
+    if (existsSync(audioFile(key))) {
+      this.audioKeys.add(key);
+      return true;
+    }
+    return false;
   }
 
   setPlayhead(cutId: string, t: number) {
@@ -132,26 +178,38 @@ export class Renderer {
   }
 
   segmentStates(cut: Cut, rev: Revision): SegmentState[] {
+    const active: Job[] = [];
+    for (const j of this.running) if (j.cut.id === cut.id && j.error !== "superseded") active.push(j);
+    for (const j of this.queue) if (j.cut.id === cut.id && j.error !== "superseded") active.push(j);
     return rev.vkeys.map((vk, s) => {
       const ak = rev.akeys[s];
-      if (existsSync(videoFile(vk)) && existsSync(audioFile(ak))) return "ready";
-      const job = [...this.running, ...this.queue].find((j) => j.cut.id === cut.id && j.error !== "superseded" && j.from <= s && s < j.to && j.vkeys[s - j.from] === vk);
-      if (job) return job.state === "running" ? "rendering" : "queued";
+      if (this.videoKeys.has(vk) && this.audioKeys.has(ak)) return "ready";
+      if (active.length) {
+        const job = active.find((j) => j.from <= s && s < j.to && j.vkeys[s - j.from] === vk);
+        if (job) return job.state === "running" ? "rendering" : "queued";
+      }
       if (this.failures.has(`${vk}:${ak}`)) return "failed";
       return "missing";
     });
   }
 
+  progressFromStates(states: SegmentState[]) {
+    let ready = 0;
+    let failed = 0;
+    let rendering = false;
+    for (let i = 0; i < states.length; i++) {
+      const s = states[i];
+      if (s === "ready") ready++;
+      else if (s === "failed") failed++;
+      else if (s === "rendering" || s === "queued") rendering = true;
+    }
+    return { ready, total: states.length, rendering, failed };
+  }
+
   progressFor(cut: Cut) {
     const rev = cut.latest;
     if (!rev) return { ready: 0, total: 0, rendering: false, failed: 0 };
-    const states = this.segmentStates(cut, rev);
-    return {
-      ready: states.filter((s) => s === "ready").length,
-      total: states.length,
-      rendering: states.some((s) => s === "rendering" || s === "queued"),
-      failed: states.filter((s) => s === "failed").length,
-    };
+    return this.progressFromStates(this.segmentStates(cut, rev));
   }
 
   rendering() {
@@ -174,6 +232,18 @@ export class Renderer {
     return undefined;
   }
 
+  resetQuality() {
+    for (const j of this.running) {
+      j.error = "superseded";
+      j.kill?.();
+    }
+    this.queue = [];
+    this.movies.clear();
+    this.failures.clear();
+    for (const t of this.assembleTimers.values()) clearTimeout(t);
+    this.assembleTimers.clear();
+  }
+
   retry(cut: Cut) {
     const rev = cut.latest;
     if (!rev) return;
@@ -186,14 +256,21 @@ export class Renderer {
     if (!rev) return;
     if (rev.n === cut.latest?.n) this.dropSuperseded(cut, rev);
     const needed: { s: number; audioOnly: boolean }[] = [];
+    const coveredPairs = new Set<string>();
+    for (const j of this.running) {
+      if (j.cut.id === cut.id && j.error !== "superseded") for (let i = 0; i < j.vkeys.length; i++) coveredPairs.add(`${j.vkeys[i]}:${j.akeys[i]}`);
+    }
+    for (const j of this.queue) {
+      if (j.cut.id === cut.id && j.error !== "superseded") for (let i = 0; i < j.vkeys.length; i++) coveredPairs.add(`${j.vkeys[i]}:${j.akeys[i]}`);
+    }
     for (let s = 0; s < rev.vkeys.length; s++) {
       const vk = rev.vkeys[s];
       const ak = rev.akeys[s];
-      const hasVideo = existsSync(videoFile(vk));
-      if (hasVideo && existsSync(audioFile(ak))) continue;
-      if (this.failures.has(`${vk}:${ak}`)) continue;
-      const covered = [...this.running, ...this.queue].some((j) => j.cut.id === cut.id && j.error !== "superseded" && j.vkeys.includes(vk) && j.akeys[j.vkeys.indexOf(vk)] === ak);
-      if (!covered) needed.push({ s, audioOnly: hasVideo });
+      const hasVideo = this.hasVideo(vk);
+      if (hasVideo && this.hasAudio(ak)) continue;
+      const pair = `${vk}:${ak}`;
+      if (this.failures.has(pair) || coveredPairs.has(pair)) continue;
+      needed.push({ s, audioOnly: hasVideo });
     }
     const runs: [number, number, boolean][] = [];
     for (const { s, audioOnly } of needed) {
@@ -202,28 +279,50 @@ export class Renderer {
       else runs.push([s, s + 1, audioOnly]);
     }
     const st = this.statsFor(cut);
+    const hasMovie = !!this.movie(cut.id, rev.n);
+    const ph = this.playheadSegment(cut.id);
+    const maxSlots = st.huge ? 1 : st.large ? Math.min(2, this.concurrency) : this.concurrency;
+    const pushJob = (from: number, to: number, audioOnly: boolean, fastStart = false) => {
+      if (from >= to) return;
+      this.queue.push({
+        id: randomUUID().slice(0, 8),
+        cut,
+        rev: rev.n,
+        hash: rev.hash,
+        from,
+        to,
+        vkeys: rev.vkeys.slice(from, to),
+        akeys: rev.akeys.slice(from, to),
+        audioOnly,
+        fastStart: fastStart || undefined,
+        priority: 0,
+        state: "queued",
+        progress: 0,
+      });
+    };
+    const fanOut = (a: number, b: number, audioOnly: boolean) => {
+      const segs = b - a;
+      if (segs <= 0) return;
+      const minChunk = audioOnly ? 8 : Math.max(3, Math.min(6, Math.round(st.startupMs / Math.max(250, st.perSegmentMs))));
+      const cap = audioOnly ? Math.min(4, maxSlots) : maxSlots;
+      const parts = segs >= minChunk * 2 ? Math.min(cap, Math.max(1, Math.floor(segs / minChunk))) : 1;
+      const size = Math.ceil(segs / parts);
+      for (let from = a; from < b; from += size) pushJob(from, Math.min(b, from + size), audioOnly);
+    };
+    let fastStarted = false;
     for (const [a, b, audioOnly] of runs) {
       const segs = b - a;
-      const estimate = segs * st.perSegmentMs;
-      let parts = 1;
-      if (!audioOnly && !st.large && estimate > 2 * st.startupMs) parts = Math.min(this.concurrency, Math.max(1, Math.floor(estimate / (2 * st.startupMs))));
-      const size = Math.ceil(segs / parts);
-      for (let from = a; from < b; from += size) {
-        const to = Math.min(b, from + size);
-        this.queue.push({
-          id: randomUUID().slice(0, 8),
-          cut,
-          rev: rev.n,
-          hash: rev.hash,
-          from,
-          to,
-          vkeys: rev.vkeys.slice(from, to),
-          akeys: rev.akeys.slice(from, to),
-          audioOnly,
-          priority: 0,
-          state: "queued",
-          progress: 0,
-        });
+      const targetAtPlayhead = ph !== undefined && ph >= a && ph < b;
+      const shouldFastStart = !fastStarted && !audioOnly && !st.huge && segs >= 7 && (!hasMovie || targetAtPlayhead);
+      if (shouldFastStart) {
+        fastStarted = true;
+        const headFrom = targetAtPlayhead ? ph! : a;
+        const headTo = Math.min(b, headFrom + FAST_START_SECS);
+        pushJob(headFrom, headTo, false, true);
+        fanOut(a, headFrom, false);
+        fanOut(headTo, b, false);
+      } else {
+        fanOut(a, b, audioOnly);
       }
     }
     this.reprioritize();
@@ -244,13 +343,16 @@ export class Renderer {
   }
 
   private statsFor(cut: Cut): CutStats {
-    const large = (cut.latest?.fileSize ?? 0) > 1_000_000_000;
+    const size = cut.latest?.fileSize ?? 0;
+    const large = size > 1_000_000_000;
+    const huge = size > 2_500_000_000;
     let st = this.stats.get(cut.id);
     if (!st) {
-      st = { startupMs: large ? 35000 : 6000, perSegmentMs: large ? 10000 : 700, samples: 0, large };
+      st = { startupMs: huge ? 30000 : large ? 12000 : 2600, perSegmentMs: huge ? 8000 : large ? 2500 : 650, samples: 0, large, huge };
       this.stats.set(cut.id, st);
     }
     st.large = large;
+    st.huge = huge;
     return st;
   }
 
@@ -264,6 +366,7 @@ export class Renderer {
       const seg = this.playheadSegment(j.cut.id);
       let p = 0;
       if (j.rev === j.cut.latest?.n) p += 1000;
+      if (j.fastStart) p += 2500;
       if (seg !== undefined) {
         p += 500;
         if (seg >= j.from && seg < j.to) p += 2000;
@@ -301,8 +404,11 @@ export class Renderer {
   }
 
   private runnable(job: Job) {
-    if (!this.statsFor(job.cut).large) return true;
-    for (const r of this.running) if (r.cut.id === job.cut.id) return false;
+    const st = this.statsFor(job.cut);
+    if (!st.large) return true;
+    const limit = st.huge ? 1 : 2;
+    let count = 0;
+    for (const r of this.running) if (r.cut.id === job.cut.id && ++count >= limit) return false;
     return true;
   }
 
@@ -350,7 +456,7 @@ export class Renderer {
     try {
       if (!source.fresh) throw new Error("the cut changed while rendering");
       const encoder = await pickEncoder();
-      const fps = job.audioOnly ? 1 : RENDER_SETTINGS.fps;
+      const fps = job.audioOnly ? Math.min(RENDER_SETTINGS.fps, Math.max(1, Math.ceil(1200 / Math.max(1, durationMs)))) : RENDER_SETTINGS.fps;
       const ex = exportSpan({
         cli: this.cli ?? findCli(),
         project: source.path,
@@ -376,12 +482,21 @@ export class Renderer {
       if (stampOf(source.path) !== source.stamp) throw new Error("the cut changed while rendering");
       const pcm = spanAudio(dir, job.to - job.from, lengths);
       if (!job.audioOnly) {
-        const segs = await splitSpan({ spanFile: join(dir, "span.mp4"), workDir: dir, firstSegment: job.from, segmentCount: job.to - job.from, lastSegmentMs: lengths[lengths.length - 1] });
-        segs.forEach((f, i) => moveInto(f, videoFile(job.vkeys[i])));
+        const spanFile = join(dir, "span.mp4");
+        const [segs] = await Promise.all([
+          splitSpan({ spanFile, workDir: dir, firstSegment: job.from, segmentCount: job.to - job.from, lastSegmentMs: lengths[lengths.length - 1] }),
+          extractSpanThumbs(spanFile, dir, fps, job.vkeys, THUMB_CACHE),
+        ]);
+        segs.forEach((f, i) => {
+          moveInto(f, videoFile(job.vkeys[i]));
+          this.videoKeys.add(job.vkeys[i]);
+        });
       }
       pcm.forEach((b, i) => {
         const target = audioFile(job.akeys[i]);
         if (!existsSync(target)) writeBuffer(target, b);
+        this.audioKeys.add(job.akeys[i]);
+        primePeaks(job.akeys[i], b);
       });
       const total = Date.now() - job.startedAt!;
       if (!job.audioOnly) {
@@ -421,22 +536,26 @@ export class Renderer {
     }
     const vkeys = new Set(job.vkeys);
     const akeys = new Set(job.akeys);
+    const ph = this.playheadSegment(cut.id);
+    const urgent = !!job.fastStart || (ph !== undefined && ph >= job.from && ph < job.to);
     for (const c of this.cuts()) {
       const latest = c.latest;
-      if (latest && latest.vkeys.some((k, i) => vkeys.has(k) || akeys.has(latest.akeys[i]))) void this.assemble(c, latest.n);
+      if (latest && latest.vkeys.some((k, i) => vkeys.has(k) || akeys.has(latest.akeys[i]))) void this.assemble(c, latest.n, c.id === cut.id && urgent);
     }
-    if (job.rev !== cut.latest?.n) void this.assemble(cut, job.rev);
+    if (job.rev !== cut.latest?.n) void this.assemble(cut, job.rev, urgent);
   }
 
   private busy(cutId: string) {
     return [...this.running, ...this.queue].some((j) => j.cut.id === cutId && (j.state === "queued" || j.state === "running"));
   }
 
-  async assemble(cut: Cut, revN: number) {
+  async assemble(cut: Cut, revN: number, urgent = false) {
     const key = `${cut.id}:${revN}`;
     const last = this.assembled.get(key);
-    if (last && this.busy(cut.id)) {
-      const wait = last.at + Math.max(ASSEMBLE_MIN_GAP_MS, last.ms * 2) - Date.now();
+    const hasMovie = !!this.movies.get(key);
+    if (last && hasMovie && !urgent && this.busy(cut.id)) {
+      const gap = Math.min(ASSEMBLE_MIN_GAP_MS, Math.max(1500, last.ms * 2));
+      const wait = last.at + gap - Date.now();
       if (wait > 0) {
         if (!this.assembleTimers.has(key)) {
           this.assembleTimers.set(
@@ -449,6 +568,11 @@ export class Renderer {
         }
         return;
       }
+    }
+    const pendingTimer = this.assembleTimers.get(key);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      this.assembleTimers.delete(key);
     }
     if (this.assembling.has(key)) {
       this.assembleAgain.add(key);
@@ -469,7 +593,10 @@ export class Renderer {
     if (!rev) return;
     const lengths = segmentLengths(rev);
     const prevMovie = this.movie(cut.id, revN);
-    const older = cut.revisions.filter((r) => r.n !== revN && r.width === rev.width && r.height === rev.height).sort((a, b) => Math.abs(a.n - revN) - Math.abs(b.n - revN) || b.n - a.n);
+    const older = cut.revisions
+      .filter((r) => r.n !== revN && r.width === rev.width && r.height === rev.height && (!r.keySig || !rev.keySig || r.keySig === rev.keySig))
+      .sort((a, b) => Math.abs(a.n - revN) - Math.abs(b.n - revN) || b.n - a.n);
+    const blankSize = previewDimensions(rev.width, rev.height, RENDER_SETTINGS.resolution);
     const fallback = (s: number, kind: "v" | "a") => {
       for (const r of older) {
         if (s >= r.vkeys.length || Math.min(r.durationMs, (s + 1) * SEGMENT_MS) - s * SEGMENT_MS !== lengths[s]) continue;
@@ -487,6 +614,10 @@ export class Renderer {
       const a = audioFile(rev.akeys[s]);
       const haveV = existsSync(v);
       const haveA = existsSync(a);
+      if (haveV) this.videoKeys.add(rev.vkeys[s]);
+      else this.videoKeys.delete(rev.vkeys[s]);
+      if (haveA) this.audioKeys.add(rev.akeys[s]);
+      else this.audioKeys.delete(rev.akeys[s]);
       const oldV = haveV ? v : fallback(s, "v");
       const oldA = haveA ? a : fallback(s, "a");
       if (haveV && haveA) {
@@ -497,7 +628,7 @@ export class Renderer {
         audio.push(oldA);
         stale.push(s);
       } else {
-        video.push(await makeBlank(rev.width, rev.height, lengths[s], RENDER_SETTINGS.fps));
+        video.push(await makeBlank(blankSize.w, blankSize.h, lengths[s], RENDER_SETTINGS.fps));
         audio.push(oldA);
         missing.push(s);
       }
@@ -536,9 +667,14 @@ export class Renderer {
   }
 
   touch(file: string) {
+    const now = Date.now();
+    const prev = this.touchedAt.get(file);
+    if (prev !== undefined && now - prev < 300_000) return;
+    this.touchedAt.set(file, now);
+    if (this.touchedAt.size > 12_000) this.touchedAt.clear();
     try {
-      const now = new Date();
-      utimesSync(file, now, now);
+      const d = new Date(now);
+      utimesSync(file, d, d);
     } catch {}
   }
 
@@ -576,6 +712,9 @@ export class Renderer {
       if (pinned.has(f.path) || Date.now() - f.at < 10 * 60_000) continue;
       try {
         rmSync(f.path, { force: true });
+        if (f.path.startsWith(VIDEO_CACHE) && f.path.endsWith(".mp4")) this.videoKeys.delete(f.path.slice(VIDEO_CACHE.length + 1, -4));
+        else if (f.path.startsWith(AUDIO_CACHE) && f.path.endsWith(".pcm")) this.audioKeys.delete(f.path.slice(AUDIO_CACHE.length + 1, -4));
+        this.touchedAt.delete(f.path);
         total -= f.size;
         removed++;
       } catch {}

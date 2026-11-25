@@ -9,19 +9,19 @@ import type { Renderer } from "./render";
 import type { Exporter } from "./exports";
 import { videoFile } from "./render";
 import { contextAt, timelineItems, SEGMENT_MS } from "./doc";
-import { extractFrame, extractThumb, run, FFMPEG, THUMB_SHORT_SIDE } from "./media";
+import { buildContactSheet, extractFrame, extractThumb, run, FFMPEG, THUMB_SHORT_SIDE } from "./media";
 import { FRAME_CACHE, THUMB_CACHE } from "./paths";
 import { RENDER_SETTINGS } from "./cuts";
 import { findCli } from "./tsrct";
 import { projectInfo, libraryPoster, resolveLibraryPath, entryRange, chunkedStream, groupOf, POSTER_SHORT_SIDE } from "./library";
 import {
-  createNote, updateNote, deleteNote, reply, publish, approve, edit, applyQueued, undoEdit, revertTo, feedbackFor, revisionInfo, displayTime, YOU, clip,
+  createNote, updateNote, deleteNote, reply, publish, approve, edit, applyQueued, undoEdit, revertTo, feedbackFor, revisionInfo, displayTime, sendMessage, notifyReply, deliverReopened, batchNotes, fmtTime, YOU, clip,
   type EditRequest,
 } from "./collab";
 import type { Author, Note, NoteStatus } from "./types";
 import { owner, seeClient, updateSettings } from "./settings";
 import { setupReport } from "./setup";
-import { CACHE_CHOICES, SERVICE_DEFAULTS, SLOT_CHOICES, cacheUsage, serviceSettings, updateService } from "./service";
+import { CACHE_CHOICES, PREVIEW_QUALITIES, SERVICE_DEFAULTS, SLOT_CHOICES, cacheUsage, serviceSettings, updateService } from "./service";
 import { CACHE_DIR, HOME_ID } from "./paths";
 import {
   MIME_OF, MediaError, addBytes, addFiles, addUrl, defaultGlobalRoot, globalRoot, settledListing, itemAt, kindOf, listing, makeFolder, peaksFor as mediaPeaks, projectRoot, recycle, refOf, relocate, rewatch, MAX_BYTES as MEDIA_MAX_BYTES, renameEntry, thumbFor, transfer, MEDIA_GUIDE,
@@ -109,16 +109,20 @@ export function cutDetail(ctx: Ctx, cut: Cut, rev?: number) {
   const r = cut.revision(rev) ?? latest;
   const doc = r ? cut.docFor(r.n)?.doc : undefined;
   const movie = r ? ctx.renderer.movie(cut.id, r.n) : undefined;
+  const segments = r ? ctx.renderer.segmentStates(cut, r) : [];
+  const renderProgress = r && latest && r.n === latest.n ? ctx.renderer.progressFromStates(segments) : ctx.renderer.progressFor(cut);
   return {
-    ...cut.summary(ctx.renderer.progressFor(cut)),
+    ...cut.summary(renderProgress),
     rev: r?.n,
     revisions: cut.revisions.map((x) => ({ ...revisionInfo(x), authorKind: x.author.kind, published: !!x.published, hasMovie: !!ctx.renderer.movie(cut.id, x.n), movieKey: ctx.renderer.movie(cut.id, x.n)?.key, restorable: !!x.snapshot && existsSync(x.snapshot), exportable: !!cut.renderSource(x.n) })),
     timeline: doc ? timelineItems(doc) : [],
-    segments: r ? ctx.renderer.segmentStates(cut, r) : [],
+    segments,
     changedSegments: r?.changedSegments ?? [],
     movie: movie ? { rev: movie.rev, key: movie.key, stale: movie.stale, missing: movie.missing, complete: movie.complete } : undefined,
     jobs: ctx.renderer.jobsFor(cut.id),
     renderError: ctx.renderer.failureFor(cut),
+    renderFps: RENDER_SETTINGS.fps,
+    previewQuality: serviceSettings().previewQuality,
     storageNotice: cut.storage?.mode === "none" ? cut.storage.reason : undefined,
     snapshotBytes: cut.snapshotBytes(),
     export: ctx.exporter.stateFor(cut),
@@ -126,6 +130,7 @@ export function cutDetail(ctx: Ctx, cut: Cut, rev?: number) {
       const d = displayTime(n as any, doc);
       return { ...n, media: n.media?.map((m) => relocate(m, cut)), displayT: d.t, moved: d.moved, anchorGone: d.gone, frame: n.frame ? `/api/cuts/${cut.id}/notes/${n.id}/frame` : undefined, annotatedFrame: n.annotatedFrame ? `/api/cuts/${cut.id}/notes/${n.id}/frame?marked=1` : undefined };
     }),
+    messages: cut.messages.slice(-50),
     activity: cut.activity.slice(-200),
     collaborators: cut.collaborators,
   };
@@ -379,10 +384,15 @@ export function startServer(ctx: Ctx, port: number) {
           if (sub === "export" && req.method === "POST") {
             if (segs[4] === "cancel") return json({ ok: ctx.exporter.cancel(cut) });
             const rev = Number(body.rev ?? cut.latest?.n);
-            const id = ctx.exporter.start(cut, rev, YOU);
+            const id = ctx.exporter.start(cut, rev, YOU, body.preset);
             return json({ id, export: ctx.exporter.stateFor(cut) });
           }
           if (sub === "publish" && req.method === "POST") return json(await publish(cut));
+          if (sub === "message" && req.method === "POST") return json(await sendMessage(cut, String(body.text ?? ""), YOU));
+          if (sub === "deliver-reopened" && req.method === "POST") {
+            const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+            return json({ delivered: await deliverReopened(cut, ids) });
+          }
           if (sub === "target" && req.method === "POST") {
             const box = await measureTarget(cut, Number(body.rev ?? cut.latest?.n), Number(body.t ?? 0), Number(body.layerId)).catch((e) => ({ error: String(e?.message ?? e) }));
             return json(box && "error" in box ? { box: null, error: box.error } : { box });
@@ -425,6 +435,11 @@ export function startServer(ctx: Ctx, port: number) {
           }
           if (sub === "notes") {
             const noteId = segs[4];
+            if (noteId === "batch" && req.method === "POST") {
+              const action = body.action;
+              if (!["resolveAddressed", "resolve", "reopen", "restore", "delete"].includes(action)) return fail(400, "unknown batch action");
+              return json(batchNotes(cut, action, Array.isArray(body.ids) ? body.ids.map(String) : undefined, body.statuses));
+            }
             if (!noteId && req.method === "POST") {
               const note = createNote(cut, {
                 rev: body.rev,
@@ -456,7 +471,11 @@ export function startServer(ctx: Ctx, port: number) {
               if (!f || !existsSync(f)) return fail(404, "no frame");
               return serveFile(req, f, "image/png", "no-cache");
             }
-            if (noteId && segs[5] === "reply" && req.method === "POST") return json(reply(cut, noteId, String(body.text ?? ""), YOU, body.status as NoteStatus | undefined));
+            if (noteId && segs[5] === "reply" && req.method === "POST") {
+              const n = reply(cut, noteId, String(body.text ?? ""), YOU, body.status as NoteStatus | undefined);
+              if (body.notify !== false && n.publishedAt) void notifyReply(cut, n, String(body.text ?? ""), body.status as NoteStatus | undefined);
+              return json(n);
+            }
             if (noteId && req.method === "PATCH") return json(updateNote(cut, noteId, { ...body, annotatedFrame: body.annotatedFrame === undefined ? undefined : (decodeDataUrl(body.annotatedFrame) ?? null) }));
             if (noteId && req.method === "DELETE") {
               deleteNote(cut, noteId);
@@ -482,20 +501,32 @@ export function startServer(ctx: Ctx, port: number) {
             await cut.ingest();
             emit({ type: "cuts" });
             emit({ type: "focus", cutId: cut.id });
-            return json({ cut: cut.path, id: cut.id, revision: cut.latest?.n, render: ctx.renderer.progressFor(cut), openNotes: cut.notes.filter((n) => n.status === "open" || n.status === "claimed").length, threadLinked: !!body.thread });
+            const recentMessages = cut.messages.filter((m) => m.author.kind === "you").slice(-5).map((m) => ({ id: m.id, text: m.text, at: m.at, rev: m.rev }));
+            return json({
+              cut: cut.path,
+              id: cut.id,
+              revision: cut.latest?.n,
+              revisionsCount: cut.revisions.length,
+              render: ctx.renderer.progressFor(cut),
+              openNotes: cut.notes.filter((n) => n.status === "open" || n.status === "claimed").length,
+              recentMessages: recentMessages.length ? recentMessages : undefined,
+              threadLinked: !!body.thread,
+            });
           }
           const cut = resolveCut(ctx, cutRef, true);
           if (!cut) return fail(404, `unknown cut: ${cutRef}. Call slate_open first.`);
           const who = agentOf(body);
           if (op === "status") {
             const state = ["working", "ready", "blocked", "idle"].includes(body.state) ? body.state : "working";
-            cut.agent = { name: who.name, state, text: String(body.message ?? ""), at: new Date().toISOString() };
+            const progress = typeof body.progress === "number" && Number.isFinite(body.progress) ? Math.max(0, Math.min(1, body.progress)) : undefined;
+            const step = typeof body.step === "string" && body.step.trim() ? body.step.trim().slice(0, 40) : undefined;
+            cut.agent = { name: who.name, state, text: String(body.message ?? ""), at: new Date().toISOString(), progress, step };
             if (state === "working" && !cut.lastAgentTouch?.publishing) cut.lastAgentTouch = { name: who.name, at: Date.now() };
             if (typeof body.thread === "string" && body.thread) cut.addCollaborator(body.thread, who.name, linkOf(body));
             cut.saveState();
             cut.log({ author: who, kind: "status", state, text: String(body.message ?? state) });
             emit({ type: "cuts" });
-            emit({ type: "agent", cutId: cut.id, cut: cut.name, name: who.name, state, text: String(body.message ?? "") });
+            emit({ type: "agent", cutId: cut.id, cut: cut.name, name: who.name, state, text: String(body.message ?? ""), progress, step });
             return json({ ok: true });
           }
           if (op === "publish") {
@@ -506,14 +537,19 @@ export function startServer(ctx: Ctx, port: number) {
             const latest = cut.latest;
             cut.agent = { name: who.name, state: "ready", text: rev ? `Published r${rev.n}${summary ? `: ${summary}` : ""}` : `Nothing new to publish since r${latest?.n ?? "?"}`, at: new Date().toISOString() };
             cut.saveState();
+            if (rev) void checksFor(cut, rev.n).catch(() => {});
             emit({ type: "cuts" });
             emit({ type: "cut", cutId: cut.id });
             const unknown = (addresses ?? []).filter((id) => !cut.notes.some((n) => n.id === id));
+            const remainingOpenNotes = cut.notes.filter((n) => n.status === "open" || n.status === "claimed").length;
             return json({
               revision: latest?.n,
               published: rev?.n,
               newRevision: !!rev,
               addressed: rev ? (addresses ?? []).filter((id) => cut.notes.find((n) => n.id === id)?.status === "addressed") : [],
+              remainingOpenNotes,
+              changedSeconds: rev?.changedSegments,
+              changes: rev?.changes.slice(0, 15),
               unknownNotes: unknown.length ? unknown : undefined,
               render: ctx.renderer.progressFor(cut),
               warning: rev
@@ -526,12 +562,14 @@ export function startServer(ctx: Ctx, port: number) {
             const timeout = Math.min(55, Math.max(1, Number(body.timeoutSec ?? url.searchParams.get("timeoutSec") ?? 50)));
             const since = String(body.since ?? url.searchParams.get("since") ?? new Date().toISOString());
             const pending = () => cut.notes.filter((n) => n.status !== "draft" && ((n.humanAt ?? (n.author.kind === "you" ? n.publishedAt : undefined) ?? "") > since || n.thread.some((t) => t.author.kind === "you" && t.at > since)));
+            const pendingMessages = () => cut.messages.filter((m) => m.author.kind === "you" && m.at > since);
             const approvedSince = () => cut.activity.find((a) => a.kind === "approve" && a.at > since);
             let found = pending();
-            if (!found.length && !approvedSince()) {
+            let msgs = pendingMessages();
+            if (!found.length && !msgs.length && !approvedSince()) {
               await new Promise<void>((done) => {
                 const w = { cutId: cut.id, resolve: () => {
-                  if (pending().length || approvedSince()) {
+                  if (pending().length || pendingMessages().length || approvedSince()) {
                     waiters.delete(w);
                     clearTimeout(timer);
                     done();
@@ -544,13 +582,74 @@ export function startServer(ctx: Ctx, port: number) {
                 waiters.add(w);
               });
               found = pending();
+              msgs = pendingMessages();
             }
             const appr = approvedSince();
-            return json({ now: new Date().toISOString(), approved: appr ? appr.rev : undefined, changed: found.map((n) => ({ id: n.id, kind: n.kind, status: n.status, text: clip(n.text, 140) })), hint: found.length || appr ? "Call slate_feedback for details." : `Nothing new yet. Wait again or end your turn; Slate messages a linked T3 thread when ${owner("the user")} sends notes.` });
+            return json({
+              now: new Date().toISOString(),
+              approved: appr ? appr.rev : undefined,
+              changed: found.map((n) => ({ id: n.id, kind: n.kind, status: n.status, text: clip(n.text, 140) })),
+              messages: msgs.length ? msgs.map((m) => ({ id: m.id, text: m.text, at: m.at })) : undefined,
+              hint: found.length || msgs.length || appr ? "Call slate_feedback for details." : `Nothing new yet. Wait again or end your turn; Slate messages a linked T3 thread when ${owner("the user")} sends notes.`,
+            });
           }
           if (op === "reply") {
+            if (Array.isArray(body.replies) && body.replies.length) {
+              const results = body.replies.map((r: any) => {
+                const n = reply(cut, String(r.note), String(r.text ?? ""), who, r.status as NoteStatus | undefined, cut.latest?.n);
+                return { id: n.id, status: n.status };
+              });
+              return json({ replies: results });
+            }
             const n = reply(cut, String(body.note), String(body.text ?? ""), who, body.status as NoteStatus | undefined, cut.latest?.n);
             return json({ id: n.id, status: n.status });
+          }
+          if (op === "inspect") {
+            const revN = body.revision !== undefined ? Number(body.revision) : cut.latest?.n;
+            const rev = cut.revision(revN) ?? cut.latest;
+            if (!rev) return fail(404, "no revision");
+            const doc = cut.docFor(rev.n)?.doc;
+            const t = typeof body.t === "number" ? body.t : undefined;
+            const compareWith = typeof body.compareWith === "number" ? body.compareWith : undefined;
+            const checks = await checksFor(cut, rev.n).catch(() => undefined);
+            const diff = compareWith !== undefined ? diffPair(cut, compareWith, rev.n) : undefined;
+            return json({
+              cut: cut.path,
+              name: cut.name,
+              revision: rev.n,
+              durationMs: rev.durationMs,
+              size: `${rev.width}x${rev.height}`,
+              render: ctx.renderer.progressFor(cut),
+              layers: doc ? timelineItems(doc) : [],
+              visibleAt: t !== undefined && doc ? { t, time: fmtTime(t), layers: contextAt(doc, t) } : undefined,
+              checks,
+              diff: diff ? { old: diff.old, new: diff.new, changedSeconds: diff.seconds.filter((s) => s.picture !== "same" || s.sound !== "same").map((s) => s.s), changes: diff.changes, pending: diff.pending } : undefined,
+            });
+          }
+          if (op === "sheet") {
+            const revN = body.revision !== undefined ? Number(body.revision) : cut.latest?.n;
+            const rev = cut.revision(revN) ?? cut.latest;
+            if (!rev) return fail(404, "no revision");
+            let times: number[] = [];
+            if (Array.isArray(body.times) && body.times.length) {
+              times = body.times.slice(0, 16).map((x: unknown) => Math.max(0, Math.min(rev.durationMs - 1, Math.round(Number(x) || 0))));
+            } else {
+              const count = Math.max(2, Math.min(16, Math.round(Number(body.count ?? 6))));
+              const from = Math.max(0, Math.min(rev.durationMs - 1, Math.round(Number(body.fromMs ?? 0))));
+              const to = Math.max(from, Math.min(rev.durationMs - 1, Math.round(Number(body.toMs ?? rev.durationMs - 1))));
+              for (let i = 0; i < count; i++) times.push(Math.round(from + ((to - from) * i) / Math.max(1, count - 1)));
+            }
+            const extracted = await Promise.all(times.map(async (t) => ({ t, file: await frameFor(ctx, cut, t, rev.n) })));
+            const ready = extracted.filter((x): x is { t: number; file: string } => !!x.file);
+            if (!ready.length) return fail(409, "no rendered segments available for those times yet; try again shortly");
+            const cols = typeof body.cols === "number" ? Math.max(1, Math.min(6, Math.round(body.cols))) : undefined;
+            const key = Bun.hash(`${cut.id}:${rev.n}:${rev.hash}:${ready.map((x) => `${x.t}=${x.file}`).join(",")}:${cols ?? "auto"}`).toString(16);
+            const out = join(FRAME_CACHE, `sheet-${cut.id}-r${rev.n}-${key}.png`);
+            if (!existsSync(out)) {
+              await buildOnce(out, () => buildContactSheet(ready.map((x) => ({ file: x.file, label: fmtTime(x.t) })), out, cols));
+            } else ctx.renderer.touch(out);
+            const missing = extracted.filter((x) => !x.file).map((x) => x.t);
+            return json({ path: out, revision: rev.n, count: ready.length, times: ready.map((x) => ({ t: x.t, time: fmtTime(x.t) })), missing: missing.length ? missing : undefined });
           }
           if (op === "frame") {
             const t = Number(body.t ?? url.searchParams.get("t") ?? 0);
@@ -594,7 +693,7 @@ function serviceState(ctx: Ctx) {
   return {
     settings: serviceSettings(),
     defaults: SERVICE_DEFAULTS,
-    choices: { cacheGb: CACHE_CHOICES, renderSlots: SLOT_CHOICES },
+    choices: { cacheGb: CACHE_CHOICES, renderSlots: SLOT_CHOICES, previewQuality: Object.values(PREVIEW_QUALITIES) },
     roots,
     cache: { dir: CACHE_DIR, ...cacheUsage() },
     media: { dir: globalRoot(), default: defaultGlobalRoot(), items: listing("global", globalRoot()).items.length },

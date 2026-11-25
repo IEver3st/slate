@@ -6,8 +6,8 @@ import { cn } from "@/lib/format";
 export const ContextMenu = C.Root;
 export const ContextTrigger = C.Trigger;
 
-const panel = "z-50 min-w-52 max-h-[70vh] overflow-y-auto rounded-xl bg-raised p-1.5 shadow-[0_12px_40px_rgba(0,0,0,.5)]";
-const row = "flex cursor-default items-center gap-2.5 rounded-lg px-2.5 py-2 outline-none data-[disabled]:text-faint data-[highlighted]:bg-hover data-[state=open]:bg-hover [&_svg]:size-4 [&_svg]:shrink-0";
+const panel = "pop-content z-50 min-w-52 max-h-[70vh] overflow-y-auto rounded-xl bg-raised/95 p-1.5 shadow-[0_12px_40px_rgba(0,0,0,.5)] backdrop-blur-md";
+const row = "flex cursor-default items-center gap-2.5 rounded-lg px-2.5 py-2 outline-none transition-colors duration-100 data-[disabled]:text-faint data-[highlighted]:bg-hover data-[state=open]:bg-hover [&_svg]:size-4 [&_svg]:shrink-0";
 
 export function ContextContent({ children }: { children: ReactNode }) {
   return (

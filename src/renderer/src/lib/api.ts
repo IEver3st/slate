@@ -78,13 +78,14 @@ export type Activity = {
   id: string;
   at: string;
   author: Author;
-  kind: "status" | "revision" | "note" | "reply" | "publish" | "approve" | "edit" | "render" | "export" | "open";
+  kind: "status" | "revision" | "note" | "reply" | "publish" | "approve" | "edit" | "render" | "export" | "open" | "message";
   state?: "working" | "ready" | "blocked" | "idle";
   text: string;
   rev?: number;
   noteId?: string;
 };
-export type AgentPresence = { name: string; state: string; text: string; at: string };
+export type CutMessage = { id: string; author: Author; text: string; at: string; rev?: number; replyToBlocked?: boolean };
+export type AgentPresence = { name: string; state: string; text: string; at: string; progress?: number; step?: string };
 export type CutSummary = {
   id: string;
   path: string;
@@ -100,10 +101,14 @@ export type CutSummary = {
   render: { ready: number; total: number; rendering: boolean; failed: number };
   missing?: boolean;
 };
-export type ExportRecord = { id: string; rev: number; file: string; at: string; bytes: number; ms: number; encoder: string; width?: number; height?: number; exists: boolean };
+export type ExportPresetId = "4k60" | "1080p60" | "1080p30" | "720p60";
+export type ExportPreset = { id: ExportPresetId; resolution: string; fps: number; label: string; detail: string };
+export type ExportRecord = { id: string; rev: number; file: string; at: string; bytes: number; ms: number; encoder: string; width?: number; height?: number; preset?: ExportPresetId; label?: string; exists: boolean };
 export type ExportJob = {
   id: string;
   rev: number;
+  preset?: ExportPresetId;
+  label?: string;
   phase: "waiting" | "starting" | "rendering" | "finishing";
   ahead: number;
   progress: number;
@@ -116,7 +121,8 @@ export type ExportJob = {
   queuedAt: number;
   file?: string;
 };
-export type ExportState = { profile: string; ready: { ok: boolean; reason?: string }; job?: ExportJob; failure?: { rev: number; error: string; at: string }; history: ExportRecord[] };
+export type ExportState = { profile: string; presets?: ExportPreset[]; ready: { ok: boolean; reason?: string }; job?: ExportJob; failure?: { rev: number; error: string; at: string }; history: ExportRecord[] };
+export type PreviewQuality = "1080p60" | "720p60" | "720p30";
 export type Collaborator = { thread: string; agent: string; at: string; link?: string };
 export type CutDetail = CutSummary & {
   rev?: number;
@@ -127,10 +133,13 @@ export type CutDetail = CutSummary & {
   movie?: { rev: number; key: string; stale: number[]; missing: number[]; complete: boolean };
   jobs: { id: string; rev: number; from: number; to: number; state: string; progress?: number }[];
   renderError?: string;
+  renderFps?: number;
+  previewQuality?: PreviewQuality;
   storageNotice?: string;
   snapshotBytes: number;
   export?: ExportState;
   notes: Note[];
+  messages?: CutMessage[];
   activity: Activity[];
   collaborators: Collaborator[];
 };

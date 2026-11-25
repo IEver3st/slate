@@ -111,22 +111,44 @@ export function entryRange(path: string, name: string, sig: string): { start: nu
 
 export function chunkedStream(path: string, from: number, to: number, sig: string) {
   let pos = from;
+  let fd: number | undefined;
+  const close = () => {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+      fd = undefined;
+    }
+  };
   return new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (pos > to) return controller.close();
-      if (signature(path) !== sig) return controller.error(new Error("project changed while reading"));
-      const len = Math.min(CHUNK, to - pos + 1);
-      const buf = Buffer.alloc(len);
-      const fd = openSync(path, "r");
-      let n = 0;
-      try {
-        n = readSync(fd, buf, 0, len, pos);
-      } finally {
-        closeSync(fd);
+      if (pos > to) {
+        close();
+        return controller.close();
       }
-      if (n <= 0) return controller.close();
-      pos += n;
-      controller.enqueue(buf.subarray(0, n));
+      if (signature(path) !== sig) {
+        close();
+        return controller.error(new Error("project changed while reading"));
+      }
+      try {
+        if (fd === undefined) fd = openSync(path, "r");
+        const len = Math.min(CHUNK, to - pos + 1);
+        const buf = Buffer.allocUnsafe(len);
+        const n = readSync(fd, buf, 0, len, pos);
+        if (n <= 0) {
+          close();
+          return controller.close();
+        }
+        pos += n;
+        controller.enqueue(buf.subarray(0, n));
+        if (pos > to) close();
+      } catch (e) {
+        close();
+        controller.error(e);
+      }
+    },
+    cancel() {
+      close();
     },
   });
 }

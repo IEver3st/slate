@@ -23,7 +23,7 @@ export function VolumeControl({ controller }: { controller: PlayerController }) 
 
   return (
     <div className="group/volume no-drag flex items-center" onWheel={(e) => e.deltaY && controller.nudgeVolume(e.deltaY < 0 ? 0.05 : -0.05)}>
-      <IconButton label={muted || volume === 0 ? "Unmute" : "Mute"} keys="M" active={muted || volume === 0} onClick={() => controller.setMuted(!(muted || volume === 0))}>
+      <IconButton label={muted || volume === 0 ? "Unmute" : "Mute"} keys="Shift M" active={muted || volume === 0} onClick={() => controller.setMuted(!(muted || volume === 0))}>
         <Icon />
       </IconButton>
       <Slider.Root

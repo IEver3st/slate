@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { cpus } from "node:os";
 import { FFMPEG, run } from "./media";
 import { audioFile, videoFile } from "./render";
 import { absoluteWindow, diffDocs } from "./doc";
@@ -30,8 +31,10 @@ function schedule(job: () => Promise<void>) {
   pump();
 }
 
+const MAX_COMPARE_JOBS = Math.min(4, Math.max(2, Math.floor(cpus().length / 2)));
+
 function pump() {
-  while (running < 2 && queue.length) {
+  while (running < MAX_COMPARE_JOBS && queue.length) {
     const job = queue.shift()!;
     running++;
     job().finally(() => {
@@ -66,9 +69,11 @@ function soundDiffers(x: string, y: string) {
   if (a.equals(b)) return false;
   const n = Math.min(a.length, b.length) >> 1;
   if (Math.abs(a.length - b.length) > 4 * 480) return true;
+  const sa = new Int16Array(a.buffer, a.byteOffset, n);
+  const sb = new Int16Array(b.buffer, b.byteOffset, n);
   let sum = 0;
   for (let i = 0; i < n; i++) {
-    const d = a.readInt16LE(i * 2) - b.readInt16LE(i * 2);
+    const d = sa[i] - sb[i];
     sum += d * d;
   }
   return Math.sqrt(sum / Math.max(1, n)) > SOUND_RMS;

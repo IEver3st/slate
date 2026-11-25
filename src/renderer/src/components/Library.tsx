@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { justify, useWidth } from "@/lib/layout";
-import { ArrowLeft, Check, FolderOpen, Search, Settings as Gear, X } from "lucide-react";
+import { ArrowLeft, ArrowUpDown, Check, FolderOpen, Search, Settings as Gear, X } from "lucide-react";
 import { api, media, type CutSummary, type LibraryFile } from "@/lib/api";
-import { useActivity, useCuts } from "@/lib/store";
+import { prefetchCut, useActivity, useCuts } from "@/lib/store";
 import { ago, cn, plural } from "@/lib/format";
 import { Button, IconButton } from "./ui/button";
 import { Img, Blank } from "./ui/img";
 import { Heading } from "./ui/heading";
+import { Menu, MenuContent, MenuItem, MenuTrigger } from "./ui/menu";
 import { AgentsPresence, Rail, togglePanel, usePanelShown } from "./Rail";
 import { awaitingReview, cutPoster, isWorking, needsYou } from "@/lib/cuts";
 import { Mark } from "./Mark";
 import { UpdatePill } from "./UpdatePill";
 import { openSettings } from "./Settings";
+import { openCommandPalette } from "./CommandPalette";
 import { usePreference } from "@/lib/preferences";
 import { MediaShelf } from "./Media";
 
@@ -24,6 +26,9 @@ export type OpenTarget = {
 
 const STACK_MIN = 10;
 const SCRUB_FRAMES = 48;
+
+type LibraryFilter = "all" | "needs" | "working" | "approved";
+type LibrarySort = "recent" | "name" | "duration";
 
 function short(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -48,7 +53,7 @@ function RemoveButton({ onRemove, className }: { onRemove: () => void; className
     <IconButton
       label="Remove from Slate"
       onClick={() => (confirm ? setArmed(true) : onRemove())}
-      className={cn("size-7 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [&_svg]:size-4", className)}
+      className={cn("size-7 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 [&_svg]:size-4", className)}
     >
       <X />
     </IconButton>
@@ -60,6 +65,7 @@ type WallItem = {
   aspect: number;
   name: string;
   at: number;
+  durationMs: number;
   group: string;
   cut?: CutSummary;
   file?: LibraryFile;
@@ -92,7 +98,7 @@ function Meta({ it }: { it: WallItem }) {
     return (
       <span className="text-soft">
         <i className="mr-2 inline-block size-[7px] rounded-full bg-teal align-middle motion-safe:animate-pulse" />
-        Agent working
+        {c.agent?.step ? `Working · ${c.agent.step}` : "Agent working"}
       </span>
     );
   if (c.render.rendering && c.render.total) return <span className="text-soft">Rendering {c.render.ready} of {c.render.total} s</span>;
@@ -122,8 +128,8 @@ function Badges({ cut }: { cut: CutSummary }) {
   if (!cut.draftNotes && !cut.openNotes) return null;
   return (
     <div className="pointer-events-none absolute top-2 left-2 flex gap-1">
-      {cut.draftNotes > 0 && <span className="rounded-full bg-amber px-2 text-[12px] leading-[20px] font-bold text-amber-ink">{cut.draftNotes}</span>}
-      {cut.openNotes > 0 && <span className="rounded-full bg-ink/85 px-2 text-[12px] leading-[20px] font-semibold text-soft">{cut.openNotes}</span>}
+      {cut.draftNotes > 0 && <span className="rounded-full bg-amber px-2 text-[12px] leading-[20px] font-bold text-amber-ink shadow-sm">{cut.draftNotes}</span>}
+      {cut.openNotes > 0 && <span className="rounded-full bg-ink/85 px-2 text-[12px] leading-[20px] font-semibold text-soft backdrop-blur-sm">{cut.openNotes}</span>}
     </div>
   );
 }
@@ -133,14 +139,47 @@ function badgeLabel(cut: CutSummary) {
   return parts.length ? parts.join(", ") : undefined;
 }
 
+/** Lazy, throttled scrub previewer — avoids firing 48 concurrent requests on casual hover! */
 function useScrub(cut: CutSummary | undefined) {
   const l = cut?.latest;
   const frames = l && l.segments > 1 ? Math.min(l.segments, SCRUB_FRAMES) : 0;
   const [at, setAt] = useState<{ i: number; moved: boolean }>();
-  const warmed = useRef(false);
+  const warmed = useRef(new Set<number>());
+  const warmTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const prefetchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const second = (i: number) => Math.floor((i * l!.segments) / frames);
   const src = (s: number) => media(`/api/cuts/${cut!.id}/thumb?rev=${l!.n}&h=${l!.hash}&s=${s}&size=poster${cut!.render.rendering ? `&r=${cut!.render.ready}` : ""}`);
-  if (!frames) return { frames: 0 } as const;
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(warmTimer.current);
+      clearTimeout(prefetchTimer.current);
+    };
+  }, []);
+
+  const preload = (i: number) => {
+    if (i < 0 || i >= frames || warmed.current.has(i)) return;
+    warmed.current.add(i);
+    const url = src(second(i));
+    if (url) new Image().src = url;
+  };
+
+  if (!frames)
+    return {
+      frames: 0,
+      handlers: cut
+        ? {
+            onPointerEnter() {
+              clearTimeout(prefetchTimer.current);
+              prefetchTimer.current = setTimeout(() => void prefetchCut(cut.id), 80);
+            },
+            onPointerLeave() {
+              clearTimeout(prefetchTimer.current);
+            },
+          }
+        : {},
+    } as const;
+
   return {
     frames,
     at,
@@ -149,19 +188,26 @@ function useScrub(cut: CutSummary | undefined) {
     durationMs: l!.durationMs,
     handlers: {
       onPointerEnter() {
-        if (warmed.current) return;
-        warmed.current = true;
-        for (let i = 0; i < frames; i++) {
-          const url = src(second(i));
-          if (url) new Image().src = url;
-        }
+        clearTimeout(prefetchTimer.current);
+        prefetchTimer.current = setTimeout(() => void prefetchCut(cut!.id), 80);
+        clearTimeout(warmTimer.current);
+        // Wait 120ms so casual pass-throughs don't spike ffmpeg; warm 8 coarse keyframes first
+        warmTimer.current = setTimeout(() => {
+          const step = Math.max(1, Math.floor(frames / 8));
+          for (let i = 0; i < frames; i += step) preload(i);
+        }, 120);
       },
       onPointerMove(e: PointerEvent<HTMLElement>) {
         const r = e.currentTarget.getBoundingClientRect();
         const i = Math.min(frames - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * frames)));
         setAt((p) => (p?.i === i ? p : { i, moved: !!p }));
+        preload(i);
+        preload(i + 1);
+        preload(i - 1);
       },
       onPointerLeave() {
+        clearTimeout(warmTimer.current);
+        clearTimeout(prefetchTimer.current);
         setAt(undefined);
       },
     },
@@ -172,18 +218,28 @@ function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: nu
   const scrub = useScrub(it.stack ? undefined : it.cut);
   const blocked = it.cut?.agent?.state === "blocked" ? it.cut.agent.text : undefined;
   const [posterShown, setPosterShown] = useState(false);
+  const rendering = it.cut && it.cut.render.rendering && it.cut.render.total > 0;
+  const renderPct = rendering ? Math.round((it.cut!.render.ready / it.cut!.render.total) * 100) : 0;
+  const agentPct = it.cut && isWorking(it.cut) && typeof it.cut.agent?.progress === "number" ? Math.round(it.cut.agent.progress * 100) : undefined;
+
   return (
     <div className="group relative shrink-0" style={{ width: w }}>
       <button
         onClick={() => onPick(scrub.frames && scrub.at?.moved ? scrub.second! * 1000 : undefined)}
         disabled={busy}
-        className="block w-full rounded-[12px] text-left"
+        className="block w-full rounded-[12px] text-left transition-transform duration-150 active:scale-[0.985]"
         title={it.file?.path ?? it.cut?.path}
-        {...(scrub.frames ? scrub.handlers : {})}
+        {...scrub.handlers}
       >
-        <div className="relative overflow-hidden rounded-[12px] bg-panel" style={{ height: h }}>
+        <div
+          className={cn(
+            "relative overflow-hidden rounded-[12px] bg-panel ring-1 ring-transparent transition-[box-shadow,border-color] duration-200 group-hover:ring-line",
+            it.cut && needsYou(it.cut) && "ring-amber/35 group-hover:ring-amber/70",
+          )}
+          style={{ height: h }}
+        >
           {it.stack ? (
-            <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 gap-[2px]">
+            <div className="tile-poster absolute inset-0 grid grid-cols-2 grid-rows-2 gap-[2px]">
               {it.stack.slice(0, 4).map((x) => (
                 <div key={x.key} className="relative overflow-hidden bg-well">
                   <Img src={itemPoster(x)} />
@@ -191,11 +247,11 @@ function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: nu
               ))}
             </div>
           ) : (
-            <>
+            <div className={cn("absolute inset-0", !(scrub.frames > 0 && scrub.src) && "tile-poster")}>
               <Blank />
               {it.fallback && !posterShown && <Img src={it.fallback} />}
               <Img src={itemPoster(it)} onReady={() => setPosterShown(true)} />
-            </>
+            </div>
           )}
           {scrub.frames > 0 && scrub.src && (
             <>
@@ -206,7 +262,7 @@ function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: nu
                 onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                 className="absolute inset-0 size-full object-cover"
               />
-              <span className="absolute bottom-3 left-2.5 rounded-md bg-ink/85 px-1.5 text-[12px] leading-[20px] font-semibold">
+              <span className="absolute bottom-3 left-2.5 rounded-md bg-ink/85 px-1.5 text-[12px] leading-[20px] font-semibold backdrop-blur-sm">
                 {short(scrub.second! * 1000)} of {short(scrub.durationMs)}
               </span>
               <span className="absolute inset-x-0 bottom-0 h-[3px] bg-white/15">
@@ -214,7 +270,15 @@ function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: nu
               </span>
             </>
           )}
-          {busy && <div className="absolute inset-0 grid place-items-center bg-ink/70 text-[13px] font-semibold">Opening</div>}
+          {!(scrub.frames > 0 && scrub.src) && (rendering || agentPct !== undefined) && (
+            <span className="pointer-events-none absolute inset-x-0 bottom-0 h-[3px] bg-ink/70">
+              <span
+                className={cn("progress-shimmer relative block h-full overflow-hidden transition-[width] duration-300", rendering ? "bg-amber" : "bg-teal")}
+                style={{ width: `${Math.max(5, rendering ? renderPct : agentPct!)}%` }}
+              />
+            </span>
+          )}
+          {busy && <div className="absolute inset-0 grid place-items-center bg-ink/70 text-[13px] font-semibold backdrop-blur-[2px]">Opening</div>}
           {it.cut && (
             <span title={badgeLabel(it.cut)}>
               <Badges cut={it.cut} />
@@ -227,7 +291,7 @@ function Tile({ it, w, h, large, busy, onPick, onRemove }: { it: WallItem; w: nu
         </div>
         {large && blocked && <p className="mt-1 line-clamp-2 text-[13px] leading-snug text-soft">{blocked}</p>}
       </button>
-      {it.cut && <RemoveButton onRemove={onRemove} className="absolute top-1.5 right-1.5 bg-ink/80" />}
+      {it.cut && <RemoveButton onRemove={onRemove} className="absolute top-1.5 right-1.5 bg-ink/80 backdrop-blur-sm" />}
     </div>
   );
 }
@@ -274,6 +338,8 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
   const [busy, setBusy] = useState<string>();
   const [openError, setOpenError] = useState<string>();
   const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<LibraryFilter>("all");
+  const [sort, setSort] = useState<LibrarySort>("recent");
   const [folder, setFolder] = useState<string>();
   const search = useRef<HTMLInputElement>(null);
   const [, tick] = useState(0);
@@ -281,7 +347,7 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 30_000);
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey && e.key.toLowerCase() === "f") || (e.key === "/" && !(e.target instanceof HTMLInputElement))) {
+      if ((e.ctrlKey && e.key.toLowerCase() === "f") || (e.key === "/" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement))) {
         e.preventDefault();
         search.current?.focus();
         search.current?.select();
@@ -315,6 +381,17 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
     [cuts],
   );
 
+  const filterCounts = useMemo(() => {
+    let needs = 0, working = 0, approved = 0;
+    for (const c of all) {
+      if (c.missing) continue;
+      if (needsYou(c)) needs++;
+      if (isWorking(c)) working++;
+      if (c.approvedRev && c.approvedRev === c.latest?.n) approved++;
+    }
+    return { needs, working, approved };
+  }, [all]);
+
   const files = useMemo(() => new Map(library.map((f) => [f.path.toLowerCase(), f])), [library]);
   const toItem = (c: CutSummary): WallItem => ({
     fallback: files.has(c.path.toLowerCase()) ? filePoster(files.get(c.path.toLowerCase())!) : undefined,
@@ -322,6 +399,7 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
     aspect: c.latest ? c.latest.width / c.latest.height : 9 / 16,
     name: c.name,
     at: Date.parse(c.latest?.at ?? "") || 0,
+    durationMs: c.latest?.durationMs ?? 0,
     group: c.folder,
     cut: c,
   });
@@ -329,31 +407,46 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
   const urgency = (c: CutSummary) => (c.agent?.state === "blocked" ? 0 : c.draftNotes > 0 ? 1 : isWorking(c) ? 2 : 3);
   const fresh = useMemo(
     () =>
-      all
-        .filter((c) => !c.missing && (needsYou(c) || isWorking(c)) && matches(c.name, c.folder))
-        .sort((a, b) => urgency(a) - urgency(b) || (b.latest?.at ?? "").localeCompare(a.latest?.at ?? ""))
-        .map(toItem),
-    [all, q, files],
+      filter !== "all"
+        ? []
+        : all
+            .filter((c) => !c.missing && (needsYou(c) || isWorking(c)) && matches(c.name, c.folder))
+            .sort((a, b) => urgency(a) - urgency(b) || (b.latest?.at ?? "").localeCompare(a.latest?.at ?? ""))
+            .map(toItem),
+    [all, q, files, filter],
   );
   const freshIds = new Set(fresh.map((i) => i.key));
   const known = new Set(all.map((c) => c.id));
 
   const wall = useMemo<WallItem[]>(() => {
-    const byRecent = (a: WallItem, b: WallItem) => b.at - a.at;
-    const fromCuts = all.filter((c) => (folder || !freshIds.has(c.id)) && matches(c.name, c.folder)).map(toItem);
-    const fromFiles: WallItem[] = library
-      .filter((f) => !(f.registered || (f.id && known.has(f.id))) && matches(f.name, `${f.folder} ${f.group ?? ""}`))
-      .map((f) => ({
-        key: f.path,
-        aspect: f.width && f.height ? f.width / f.height : 9 / 16,
-        name: f.name,
-        at: f.mtimeMs,
-        group: f.group || f.folder,
-        file: f,
-      }));
-    const items = [...fromCuts, ...fromFiles].sort(byRecent);
+    const comparator = (a: WallItem, b: WallItem) =>
+      sort === "name" ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) : sort === "duration" ? b.durationMs - a.durationMs || b.at - a.at : b.at - a.at;
+
+    const cutPasses = (c: CutSummary) => {
+      if (filter === "needs") return needsYou(c);
+      if (filter === "working") return isWorking(c);
+      if (filter === "approved") return !c.missing && !!c.approvedRev && c.approvedRev === c.latest?.n;
+      return true;
+    };
+
+    const fromCuts = all.filter((c) => cutPasses(c) && (folder || filter !== "all" || !freshIds.has(c.id)) && matches(c.name, c.folder)).map(toItem);
+    const fromFiles: WallItem[] =
+      filter !== "all"
+        ? []
+        : library
+            .filter((f) => !(f.registered || (f.id && known.has(f.id))) && matches(f.name, `${f.folder} ${f.group ?? ""}`))
+            .map((f) => ({
+              key: f.path,
+              aspect: f.width && f.height ? f.width / f.height : 9 / 16,
+              name: f.name,
+              at: f.mtimeMs,
+              durationMs: f.durationMs ?? 0,
+              group: f.group || f.folder,
+              file: f,
+            }));
+    const items = [...fromCuts, ...fromFiles].sort(comparator);
     if (folder) return items.filter((i) => i.group === folder);
-    if (terms.length) return items;
+    if (terms.length || filter !== "all" || sort !== "recent") return items;
     const counts = new Map<string, number>();
     for (const i of fromFiles) counts.set(i.group, (counts.get(i.group) ?? 0) + 1);
     const stacks = new Map<string, WallItem[]>();
@@ -368,11 +461,12 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
         aspect: 4 / 5,
         name: g,
         at: list[0].at,
+        durationMs: 0,
         group: g,
         stack: list,
       });
-    return out.sort(byRecent);
-  }, [all, library, q, folder, fresh]);
+    return out.sort(comparator);
+  }, [all, library, q, folder, fresh, filter, sort]);
 
   async function openFile(path: string) {
     setBusy(path);
@@ -410,15 +504,16 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
   const nothing = cuts && cuts.length === 0 && library.length === 0;
   const showFresh = !folder && fresh.length > 0;
   const total = wall.reduce((n, i) => n + (i.stack?.length ?? 1), 0);
+  const sortLabel = sort === "recent" ? "Recent" : sort === "name" ? "Name" : "Duration";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="view-enter flex h-full flex-col">
       <header className="drag flex h-12 shrink-0 items-center gap-3 pr-[150px] pl-5">
         <Mark />
         <span className="font-semibold">Slate</span>
         <UpdatePill />
         <div className="flex-1" />
-        <label className="no-drag flex h-[34px] w-[320px] items-center gap-2 rounded-[9px] bg-panel px-3 text-faint focus-within:text-soft focus-within:ring-2 focus-within:ring-amber/60">
+        <label className="no-drag flex h-[34px] w-[320px] items-center gap-2 rounded-[9px] bg-panel px-3 text-faint transition-shadow focus-within:text-soft focus-within:ring-2 focus-within:ring-amber/60">
           <Search className="size-[15px] shrink-0" />
           <input
             ref={search}
@@ -433,9 +528,18 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
             placeholder="Search projects and media"
             className="h-full min-w-0 flex-1 bg-transparent text-[13.5px] text-text outline-none placeholder:text-faint"
           />
-          {q && (
+          {q ? (
             <button onClick={() => setQ("")} aria-label="Clear search" className="grid size-5 place-items-center rounded text-dim hover:text-text">
               <X className="size-3.5" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={openCommandPalette}
+              title="Open command palette (Ctrl K)"
+              className="rounded bg-raised px-1.5 py-0.5 text-[11px] font-semibold text-dim transition-colors hover:bg-hover hover:text-text"
+            >
+              Ctrl K
             </button>
           )}
         </label>
@@ -452,6 +556,48 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
         <main className="min-h-0 overflow-y-auto px-8 pt-4 pb-12">
           {error && <div className="mb-4 rounded-lg bg-panel px-4 py-3 text-red">{error}</div>}
           {openError && <div className="mb-4 rounded-lg bg-panel px-4 py-3 text-red">{openError}</div>}
+          {!nothing && all.length > 0 && !folder && (
+            <div className="mb-6 flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { id: "all", label: "All", count: all.length },
+                  { id: "needs", label: "Needs you", count: filterCounts.needs },
+                  { id: "working", label: "Working", count: filterCounts.working },
+                  { id: "approved", label: "Approved", count: filterCounts.approved },
+                ] as const
+              )
+                .filter((p) => p.id === "all" || p.count > 0 || filter === p.id)
+                .map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => setFilter(p.id)}
+                    className={cn(
+                      "rounded-lg px-2.5 py-1 text-[12.5px] font-semibold transition-colors",
+                      filter === p.id ? "bg-raised text-text" : "text-dim hover:bg-panel hover:text-soft",
+                    )}
+                  >
+                    {p.label}
+                    {p.count > 0 && p.id !== "all" && (
+                      <span className={cn("ml-1.5 tabular-nums", p.id === "needs" ? "text-amber" : p.id === "working" ? "text-teal" : "text-faint")}>{p.count}</span>
+                    )}
+                  </button>
+                ))}
+              <div className="flex-1" />
+              <Menu>
+                <MenuTrigger asChild>
+                  <button className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] font-medium text-dim transition-colors hover:bg-panel hover:text-text">
+                    <ArrowUpDown className="size-3.5" />
+                    {sortLabel}
+                  </button>
+                </MenuTrigger>
+                <MenuContent>
+                  <MenuItem onSelect={() => setSort("recent")}>Most recent</MenuItem>
+                  <MenuItem onSelect={() => setSort("name")}>Name (A–Z)</MenuItem>
+                  <MenuItem onSelect={() => setSort("duration")}>Longest first</MenuItem>
+                </MenuContent>
+              </Menu>
+            </div>
+          )}
           {nothing && (
             <div className="mx-auto mt-24 max-w-md text-center">
               <div className="text-[17px] font-semibold">No projects yet</div>
@@ -479,15 +625,19 @@ export function Library({ onOpen }: { onOpen: (t: OpenTarget) => void }) {
                     <Heading count={wall.length}>{folder}</Heading>
                   </div>
                 ) : (
-                  <Heading count={total}>{showFresh ? "All projects" : "Projects"}</Heading>
+                  <Heading count={total}>{filter !== "all" ? (filter === "needs" ? "Needs you" : filter === "working" ? "Agents working" : "Approved") : showFresh ? "All projects" : "Projects"}</Heading>
                 )
               }
             >
               <Wall items={wall} busy={busy} onPick={choose} onRemove={(c) => void remove(c.id)} />
             </Section>
           )}
-          {terms.length > 0 && !fresh.length && !wall.length && <p className="mt-16 mb-10 text-center text-soft">No projects match “{q.trim()}”.</p>}
-          {!folder && <MediaShelf q={q} />}
+          {(terms.length > 0 || filter !== "all") && !fresh.length && !wall.length && (
+            <p className="mt-16 mb-10 text-center text-soft">
+              {terms.length ? `No projects match “${q.trim()}”.` : "No projects in this view yet."}
+            </p>
+          )}
+          {!folder && filter === "all" && <MediaShelf q={q} />}
         </main>
         <Rail cuts={all} activity={activity} onOpen={onOpen} />
       </div>

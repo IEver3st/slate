@@ -9,9 +9,9 @@ export type SlateEvent =
   | { type: "mix"; cutId: string; rev: number }
   | { type: "diff"; cutId: string }
   | { type: "checks"; cutId: string }
-  | { type: "export"; cutId: string; cut: string; rev: number; state: "queued" | "running" | "done" | "failed" | "cancelled"; progress: number; phase: string; file?: string; bytes?: number; error?: string }
+  | { type: "export"; cutId: string; cut: string; rev: number; label?: string; state: "queued" | "running" | "done" | "failed" | "cancelled"; progress: number; phase: string; file?: string; bytes?: number; error?: string }
   | { type: "focus"; cutId: string; t?: number; noteId?: string }
-  | { type: "agent"; cutId: string; cut: string; name: string; state: string; text: string }
+  | { type: "agent"; cutId: string; cut: string; name: string; state: string; text: string; progress?: number; step?: string }
   | { type: "library" }
   | { type: "media"; lib: string }
   | { type: "service" }

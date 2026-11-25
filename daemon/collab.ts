@@ -8,7 +8,7 @@ import { emit } from "./events";
 import { MEDIA_GUIDE, relocate, type MediaRef } from "./medialib";
 import { owner } from "./settings";
 import { nowIso, describeChanges, sendable, type Cut } from "./cuts";
-import { NOTE_TAGS, type Annotation, type Author, type Note, type NoteStatus, type NoteTag, type NoteTarget, type Revision, type Suggestion } from "./types";
+import { NOTE_TAGS, type Annotation, type Author, type CutMessage, type Note, type NoteStatus, type NoteTag, type NoteTarget, type Revision, type Suggestion } from "./types";
 
 export const YOU: Author = { kind: "you", name: "You" };
 
@@ -191,6 +191,22 @@ export function clip(text: string, n = 90) {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 }
 
+function digestNotes(notes: Note[], doc: Doc | undefined) {
+  const lines = notes.slice(0, 8).map((n) => {
+    const d = displayTime(n as any, doc);
+    const body = clip(n.text || (n.tag ? TAG_TEXT[n.tag] : "See frame"), 100);
+    const extras = [
+      n.tag ? `[${n.tag}]` : "",
+      n.target ? `on "${n.target.name}"` : "",
+      n.annotations.length ? "+drawing" : "",
+      n.media?.length ? `+${n.media.length} media` : "",
+    ].filter(Boolean).join(" ");
+    return `- [${n.id}] @${fmtTime(d.t)}${extras ? ` ${extras}` : ""}: ${body}`;
+  });
+  if (notes.length > 8) lines.push(`- ...and ${notes.length - 8} more`);
+  return lines.join("\n");
+}
+
 export async function publish(cut: Cut) {
   const drafts = cut.notes.filter(sendable);
   const leftBehind = cut.notes.filter((n) => n.status === "draft").length - drafts.length;
@@ -204,8 +220,109 @@ export async function publish(cut: Cut) {
   cut.saveNotes();
   cut.log({ author: YOU, kind: "publish", rev: cut.latest?.n, text: `Sent ${drafts.length} note${drafts.length === 1 ? "" : "s"} on r${cut.latest?.n ?? "?"}` });
   emit({ type: "notes", cutId: cut.id });
-  const delivered = await deliver(cut, `${owner()} left ${drafts.length} new note${drafts.length === 1 ? "" : "s"} on "${cut.name}" (r${cut.latest?.n}) in Slate.`);
+  const doc = cut.latest ? cut.docFor(cut.latest.n)?.doc : undefined;
+  const summary = digestNotes(drafts, doc);
+  const delivered = await deliver(
+    cut,
+    `${owner()} left ${drafts.length} new note${drafts.length === 1 ? "" : "s"} on "${cut.name}" (r${cut.latest?.n}) in Slate:\n${summary}\n`,
+  );
   return { published: drafts.length, leftBehind, delivered };
+}
+
+export async function sendMessage(cut: Cut, text: string, author: Author = YOU) {
+  const clean = text.trim();
+  if (!clean) throw new Error("message cannot be empty");
+  const wasBlocked = cut.agent?.state === "blocked";
+  const msg: CutMessage = { id: shortId(), author, text: clean, at: nowIso(), rev: cut.latest?.n, replyToBlocked: wasBlocked || undefined };
+  cut.messages.push(msg);
+  if (cut.messages.length > 100) cut.messages.splice(0, cut.messages.length - 100);
+  if (author.kind === "you" && wasBlocked && cut.agent) {
+    cut.agent = { ...cut.agent, state: "working", text: `Answered: ${clip(clean, 80)}`, at: msg.at };
+  }
+  cut.saveState();
+  cut.log({ author, kind: "message", rev: cut.latest?.n, text: clip(clean, 140) });
+  emit({ type: "cut", cutId: cut.id });
+  emit({ type: "cuts" });
+  const delivered = author.kind === "you"
+    ? await deliver(
+        cut,
+        wasBlocked
+          ? `${owner()} answered your question on "${cut.name}" (r${cut.latest?.n}) in Slate: "${clip(clean, 300)}".`
+          : `${owner()} sent a note on "${cut.name}" (r${cut.latest?.n}) in Slate: "${clip(clean, 300)}".`,
+      )
+    : [];
+  return { message: msg, delivered, unblocked: wasBlocked };
+}
+
+export async function notifyReply(cut: Cut, note: Note, text: string, status?: NoteStatus) {
+  if (note.status === "draft") return [];
+  const doc = cut.latest ? cut.docFor(cut.latest.n)?.doc : undefined;
+  const d = displayTime(note as any, doc);
+  const verb = status === "open" ? "reopened" : "replied to";
+  const body = text.trim() ? `: "${clip(text, 220)}"` : "";
+  return deliver(cut, `${owner()} ${verb} note [${note.id}] @${fmtTime(d.t)} on "${cut.name}" (r${cut.latest?.n})${body}.`);
+}
+
+export async function deliverReopened(cut: Cut, noteIds: string[]) {
+  const list = noteIds.map((id) => cut.notes.find((n) => n.id === id)).filter((n): n is Note => !!n);
+  if (!list.length) return [];
+  const doc = cut.latest ? cut.docFor(cut.latest.n)?.doc : undefined;
+  const lines = list.slice(0, 8).map((n) => {
+    const d = displayTime(n as any, doc);
+    const last = [...n.thread].reverse().find((t) => t.author.kind === "you")?.text;
+    return `- [${n.id}] @${fmtTime(d.t)}: ${clip(last || n.text, 100)}`;
+  });
+  return deliver(cut, `${owner()} checked fixes on "${cut.name}" (r${cut.latest?.n}) and reopened ${list.length} note${list.length === 1 ? "" : "s"}:\n${lines.join("\n")}\n`);
+}
+
+export function batchNotes(cut: Cut, action: "resolveAddressed" | "resolve" | "reopen" | "restore" | "delete", ids?: string[], statuses?: Record<string, NoteStatus>) {
+  const targetIds = new Set(ids ?? []);
+  const previous: Record<string, NoteStatus> = {};
+  const changed: string[] = [];
+  if (action === "delete") {
+    const kept: Note[] = [];
+    for (const n of cut.notes) {
+      if (targetIds.has(n.id)) {
+        for (const f of [n.frame, n.annotatedFrame]) if (f) rmSync(f, { force: true });
+        changed.push(n.id);
+      } else kept.push(n);
+    }
+    if (changed.length) {
+      cut.notes = kept;
+      cut.saveNotes();
+      emit({ type: "notes", cutId: cut.id });
+    }
+    return { changed, previous };
+  }
+  const now = nowIso();
+  for (const n of cut.notes) {
+    const match = action === "resolveAddressed" ? n.status === "addressed" : targetIds.has(n.id);
+    if (!match) continue;
+    const next: NoteStatus =
+      action === "resolveAddressed" || action === "resolve"
+        ? "resolved"
+        : action === "reopen"
+          ? "open"
+          : (statuses?.[n.id] ?? n.status);
+    if (next === n.status) continue;
+    previous[n.id] = n.status;
+    n.status = next;
+    n.updatedAt = now;
+    if (n.publishedAt) {
+      n.humanAt = now;
+      if (action === "resolveAddressed" || action === "resolve") n.thread.push({ id: shortId(), author: YOU, text: "Resolved.", at: now, status: "resolved" });
+      else if (action === "reopen") n.thread.push({ id: shortId(), author: YOU, text: "Reopened.", at: now, status: "open" });
+    }
+    changed.push(n.id);
+  }
+  if (changed.length) {
+    cut.saveNotes();
+    if (action === "resolveAddressed" || action === "resolve") {
+      cut.log({ author: YOU, kind: "reply", text: `Resolved ${changed.length} note${changed.length === 1 ? "" : "s"}` });
+    }
+    emit({ type: "notes", cutId: cut.id });
+  }
+  return { changed, previous };
 }
 
 export async function approve(cut: Cut, revN: number) {
@@ -566,6 +683,10 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
     };
   });
   const withMedia = notes.some((n) => n.media?.length);
+  const messages = cut.messages
+    .filter((m) => m.author.kind === "you" && (!opts.since || m.at > opts.since))
+    .slice(-15)
+    .map((m) => ({ id: m.id, by: m.author.name, text: m.text, at: m.at, rev: m.rev, replyToBlocked: m.replyToBlocked }));
   return {
     now,
     cut: cut.path,
@@ -574,9 +695,11 @@ export function feedbackFor(cut: Cut, opts: { status?: string; since?: string } 
     approvedRevision: cut.approvedRev,
     durationMs: latest?.durationMs,
     size: latest ? `${latest.width}x${latest.height}` : undefined,
+    agentState: cut.agent,
+    messages: messages.length ? messages : undefined,
     notes,
-    guidance: notes.length
-      ? "Address each note. A note with only a tag carries the tag sentence as its text. target names the layer the note is about. comparedWithRevision means the reviewer was comparing against that revision when writing it, so check what differs there. Edits marked appliedToCut are already in the project: fold them into your generator or source so your next build keeps them. Reply with slate_reply (status claimed/addressed/wontfix) and call slate_publish with addresses=[note ids] after committing."
+    guidance: notes.length || messages.length
+      ? "Address each note and any direct messages. A note with only a tag carries the tag sentence as its text. target names the layer the note is about. comparedWithRevision means the reviewer was comparing against that revision when writing it, so check what differs there. Edits marked appliedToCut are already in the project: fold them into your generator or source so your next build keeps them. Reply with slate_reply (status claimed/addressed/wontfix; supports batch replies) and call slate_publish with addresses=[note ids] after committing."
       : "No open feedback.",
     mediaGuide: withMedia ? MEDIA_GUIDE : undefined,
   };

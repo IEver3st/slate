@@ -76,6 +76,7 @@ function phrase(a: ActivityItem): { verb: string; body?: string } {
     return { verb, body: t && t !== a.state ? t : undefined };
   }
   if (a.kind === "note") return { verb: "left a note", body: t };
+  if (a.kind === "message") return { verb: "messaged the agent", body: t };
   return { verb: lower(t) };
 }
 
@@ -297,6 +298,7 @@ function Row({ children, leaving, delay, className, onClick, label }: { children
 
 function AgentRow({ cut, delay, leaving, onOpen }: { cut: CutSummary; delay: number; leaving: boolean; onOpen: (t: OpenTarget) => void }) {
   const s = agentState(cut);
+  const progress = s.tone === "working" && typeof cut.agent?.progress === "number" ? cut.agent.progress : undefined;
   return (
     <Row leaving={leaving} delay={delay} onClick={() => onOpen({ cutId: cut.id })} className="grid-cols-[40px_minmax(0,1fr)] items-center gap-x-3 rounded-xl px-2.5 py-2 hover:bg-panel">
       <Avatar cut={cut} tone={s.tone} size="lg" />
@@ -304,11 +306,17 @@ function AgentRow({ cut, delay, leaving, onOpen }: { cut: CutSummary; delay: num
         <div className="flex items-baseline gap-2">
           <b className="max-w-[70%] shrink-0 truncate font-semibold">{cut.name}</b>
           <span className="min-w-0 flex-1 truncate text-[13px] text-dim">{cut.agent!.name}</span>
+          {cut.agent?.step && s.tone === "working" && <span className="shrink-0 rounded bg-teal/15 px-1.5 py-px text-[11px] font-semibold text-teal">{cut.agent.step}</span>}
           <span className="shrink-0 text-[12px] text-faint tabular-nums">{ago(cut.agent!.at)}</span>
         </div>
         <div key={s.text} className={cn("rail-swap line-clamp-2 text-[13px] leading-snug [overflow-wrap:anywhere]", s.tone === "needs" ? "text-amber" : s.tone === "working" ? "text-soft" : "text-dim")}>
           {s.text}
         </div>
+        {progress !== undefined && (
+          <div className="relative mt-1.5 h-1 overflow-hidden rounded-full bg-line">
+            <div className="progress-shimmer relative h-full rounded-full bg-teal transition-[width] duration-300" style={{ width: `${Math.max(4, Math.round(progress * 100))}%` }} />
+          </div>
+        )}
       </div>
     </Row>
   );

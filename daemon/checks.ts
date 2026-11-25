@@ -73,16 +73,19 @@ function clipping(cut: Cut, n: number): Finding[] | undefined {
     readSync(fd, buf, 0, buf.length, 0);
     closeSync(fd);
     const frames = buf.length >> 2;
-    const runs = [0, 0];
+    const samples = new Int16Array(buf.buffer, buf.byteOffset, frames * 2);
+    let runL = 0;
+    let runR = 0;
     for (let i = 0; i < frames; i++) {
-      for (let ch = 0; ch < 2; ch++) {
-        const v = Math.abs(buf.readInt16LE(i * 4 + ch * 2));
-        runs[ch] = v >= CLIP_LEVEL ? runs[ch] + 1 : 0;
-        if (runs[ch] === CLIP_RUN) {
-          const at = s * SEGMENT_MS + Math.round((i / frames) * SEGMENT_MS);
-          if (at - last > CLIP_MERGE_MS) found.push({ level: "warning", rule: "clipping", message: "The mix clips here. Lower the loudest layer or the master.", atMs: at, source: "sound" });
-          last = at;
-        }
+      const idx = i << 1;
+      const vl = samples[idx];
+      const vr = samples[idx + 1];
+      runL = (vl < 0 ? -vl : vl) >= CLIP_LEVEL ? runL + 1 : 0;
+      runR = (vr < 0 ? -vr : vr) >= CLIP_LEVEL ? runR + 1 : 0;
+      if (runL === CLIP_RUN || runR === CLIP_RUN) {
+        const at = s * SEGMENT_MS + Math.round((i / frames) * SEGMENT_MS);
+        if (at - last > CLIP_MERGE_MS) found.push({ level: "warning", rule: "clipping", message: "The mix clips here. Lower the loudest layer or the master.", atMs: at, source: "sound" });
+        last = at;
       }
     }
   });
@@ -122,6 +125,34 @@ export async function checksFor(cut: Cut, n: number): Promise<Checks | undefined
 const PEAK_MS = 50;
 const peakCache = new Map<string, number[]>();
 
+function computePeaks(buf: Buffer) {
+  const frames = buf.length >> 2;
+  const samples = new Int16Array(buf.buffer, buf.byteOffset, frames * 2);
+  const bins = Math.max(1, Math.round(SEGMENT_MS / PEAK_MS));
+  const out: number[] = new Array(bins);
+  for (let b = 0; b < bins; b++) {
+    let sum = 0;
+    const from = Math.floor((b / bins) * frames);
+    const to = Math.floor(((b + 1) / bins) * frames);
+    for (let i = from; i < to; i++) {
+      const idx = i << 1;
+      const l = samples[idx];
+      const r = samples[idx + 1];
+      sum += (l * l + r * r) * 0.5;
+    }
+    const rms = Math.sqrt(sum / Math.max(1, to - from)) / 32768;
+    const db = rms > 0 ? 20 * Math.log10(rms) : -96;
+    out[b] = Math.round(Math.max(0, Math.min(1, (db + 42) / 42)) * 255);
+  }
+  return out;
+}
+
+export function primePeaks(key: string, buf: Buffer) {
+  if (peakCache.has(key)) return;
+  if (peakCache.size > 4000) peakCache.delete(peakCache.keys().next().value!);
+  peakCache.set(key, computePeaks(buf));
+}
+
 function peaksOf(key: string) {
   const hit = peakCache.get(key);
   if (hit) return hit;
@@ -131,22 +162,7 @@ function peaksOf(key: string) {
   const fd = openSync(file, "r");
   readSync(fd, buf, 0, buf.length, 0);
   closeSync(fd);
-  const frames = buf.length >> 2;
-  const bins = Math.max(1, Math.round(SEGMENT_MS / PEAK_MS));
-  const out: number[] = [];
-  for (let b = 0; b < bins; b++) {
-    let sum = 0;
-    const from = Math.floor((b / bins) * frames);
-    const to = Math.floor(((b + 1) / bins) * frames);
-    for (let i = from; i < to; i++) {
-      const l = buf.readInt16LE(i * 4);
-      const r = buf.readInt16LE(i * 4 + 2);
-      sum += (l * l + r * r) / 2;
-    }
-    const rms = Math.sqrt(sum / Math.max(1, to - from)) / 32768;
-    const db = rms > 0 ? 20 * Math.log10(rms) : -96;
-    out.push(Math.round(Math.max(0, Math.min(1, (db + 42) / 42)) * 255));
-  }
+  const out = computePeaks(buf);
   if (peakCache.size > 4000) peakCache.delete(peakCache.keys().next().value!);
   peakCache.set(key, out);
   return out;
